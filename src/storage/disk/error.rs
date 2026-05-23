@@ -6,4 +6,6 @@ pub enum DiskManagerError {
     Io(#[from] std::io::Error),
     #[error("does not match expected page size")]
     InvalidPageSize,
+    #[error("page {0} not found")]
+    PageNotFound(usize),
 }

@@ -94,4 +94,14 @@ impl DiskManager {
 
         Ok(self.pages.len() * DEFAULT_PAGE_SIZE)
     }
+
+    pub fn delete_page(&mut self, page_id: usize) -> Result<(), DiskManagerError> {
+        match self.pages.remove(&page_id) {
+            None => Err(DiskManagerError::PageNotFound(page_id)),
+            Some(offset) => {
+                self.free_slots.push(offset);
+                Ok(())
+            }
+        }
+    }
 }
