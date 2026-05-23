@@ -7,6 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
+#[derive(Debug)]
 pub struct DiskManager {
     db_file: PathBuf,
     db_file_handle: File,
@@ -103,5 +104,92 @@ impl DiskManager {
                 Ok(())
             }
         }
+    }
+
+    pub fn get_db_file_size(&self) -> Result<u64, DiskManagerError> {
+        Ok(self.db_file_handle.metadata()?.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn setup_disk_manager() -> DiskManager {
+        let file = NamedTempFile::new().unwrap();
+        DiskManager::new(file.path().to_path_buf()).unwrap()
+    }
+
+    #[test]
+    fn invalid_file() {
+        let result = DiskManager::new(PathBuf::from("dev/null\\/foo/bar/baz/test"));
+        assert!(matches!(result, Err(DiskManagerError::Io(_))));
+    }
+
+    #[test]
+    fn read_inexistant_page() {
+        let mut dm = setup_disk_manager();
+        let mut buf = [0; DEFAULT_PAGE_SIZE];
+        let result = dm.read_page(0, &mut buf);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn read_write_page() {
+        let mut dm = setup_disk_manager();
+        let mut buf = [0; DEFAULT_PAGE_SIZE];
+        let mut output_buf = [0; DEFAULT_PAGE_SIZE];
+        let test_string = "Hello world";
+        let bytes = test_string.as_bytes();
+        buf[..bytes.len()].copy_from_slice(bytes);
+
+        let result = dm.write_page(0, &buf);
+        assert!(result.is_ok());
+
+        let result = dm.read_page(0, &mut output_buf);
+        assert!(result.is_ok());
+
+        assert_eq!(&buf[..], &output_buf[..]);
+    }
+
+    #[test]
+    fn delete_page_test() -> Result<(), DiskManagerError> {
+        let mut dm = setup_disk_manager();
+
+        let initial_size = dm.get_db_file_size()?;
+        let mut buf = [0u8; DEFAULT_PAGE_SIZE];
+        let mut data = [0u8; DEFAULT_PAGE_SIZE];
+
+        let text = "A test string.";
+        data[..text.len()].copy_from_slice(text.as_bytes());
+
+        let mut pages_to_write = 100;
+        for page_id in 0..pages_to_write {
+            dm.write_page(page_id, &data)?;
+            dm.read_page(page_id, &mut buf)?;
+            assert_eq!(buf, data);
+        }
+
+        let size_after_write = dm.get_db_file_size()?;
+        assert!(size_after_write >= initial_size);
+
+        pages_to_write *= 2;
+        data = [0u8; DEFAULT_PAGE_SIZE];
+        let text = "test string version 2";
+        data[..text.len()].copy_from_slice(text.as_bytes());
+
+        for page_id in 0..pages_to_write {
+            dm.write_page(page_id, &data)?;
+            dm.read_page(page_id, &mut buf)?;
+            assert_eq!(buf, data);
+            dm.delete_page(page_id)?;
+        }
+        let size_after_delete = dm.get_db_file_size()?;
+
+        // Deleting pages just marks them as free, we don't reclaim anything
+        assert_eq!(size_after_delete, size_after_write);
+        Ok(())
     }
 }
