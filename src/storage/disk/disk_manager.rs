@@ -4,7 +4,7 @@ use crate::storage::disk::error::DiskManagerError;
 use super::config::DEFAULT_DB_FILE_PAGE_CAPACITY;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 pub struct DiskManager {
@@ -34,6 +34,28 @@ impl DiskManager {
         })
     }
 
+    // Reading an unallocated page creates it and returns the zero-filled file contents.
+    // TODO: see if this behaviour is really necessary, we can always add a new function
+    // that just allocates a new page
+    pub fn read_page(&mut self, page_id: usize, data: &mut [u8]) -> Result<(), DiskManagerError> {
+        if data.len() != DEFAULT_PAGE_SIZE {
+            return Err(DiskManagerError::InvalidPageSize);
+        }
+
+        // If the page is not allocated yet, it's OK we allocate it on the fly
+        let offset = match self.pages.get(&page_id) {
+            Some(offset) => *offset,
+            None => self.allocate_new_page()?,
+        };
+
+        self.db_file_handle.seek(SeekFrom::Start(offset as u64))?;
+        self.db_file_handle.read_exact(data)?;
+
+        self.pages.insert(page_id, offset);
+
+        Ok(())
+    }
+
     pub fn write_page(&mut self, page_id: usize, data: &[u8]) -> Result<(), DiskManagerError> {
         if data.len() != DEFAULT_PAGE_SIZE {
             return Err(DiskManagerError::InvalidPageSize);
@@ -59,8 +81,8 @@ impl DiskManager {
     // previously deleted pages first before using fresh pages. Makes more
     // space in the file if necessary.
     fn allocate_new_page(&mut self) -> Result<usize, DiskManagerError> {
-        if let Some(page_id) = self.free_slots.pop() {
-            return Ok(page_id);
+        if let Some(offset) = self.free_slots.pop() {
+            return Ok(offset);
         }
 
         if self.pages.len() >= self.page_capacity {
