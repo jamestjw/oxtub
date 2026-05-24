@@ -1,4 +1,5 @@
 mod buffer;
+mod common;
 mod storage;
 
 fn main() {

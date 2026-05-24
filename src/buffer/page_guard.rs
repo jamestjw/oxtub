@@ -37,7 +37,6 @@ impl std::ops::Deref for ReadPageGuard<'_> {
     }
 }
 
-
 impl Drop for WritePageGuard<'_> {
     fn drop(&mut self) {
         let mut state = self.bpm.state.lock().unwrap();
