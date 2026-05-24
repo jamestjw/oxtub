@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    buffer::{frame::FrameMeta, page::Page, replacer::Replacer},
+    buffer::{frame::{Frame, FrameMeta}, page::Page, replacer::Replacer},
     storage::disk::disk_manager::DiskManager,
 };
 
@@ -17,7 +17,7 @@ pub struct BufferPoolInner {
     pub(crate) state: Mutex<BufferPoolState>,
     // TODO: eventually, our buffer pool should just allocate a huge chunk
     // of memory at startup and just distribute that between the frames.
-    frames: Vec<RwLock<Page>>,
+    frames: Vec<Frame>,
     disk: Mutex<DiskManager>,
 }
 

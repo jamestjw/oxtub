@@ -9,3 +9,11 @@ pub enum DiskManagerError {
     #[error("page {0} not found")]
     PageNotFound(usize),
 }
+
+#[derive(Debug, Error)]
+pub enum DiskSchedulerError {
+    #[error("io error {0}")]
+    Disk(#[from] DiskManagerError),
+    #[error("worker stopped")]
+    WorkerStopped,
+}
