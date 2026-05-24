@@ -16,4 +16,6 @@ pub enum DiskSchedulerError {
     Disk(#[from] DiskManagerError),
     #[error("worker stopped")]
     WorkerStopped,
+    #[error("worker unreachable")]
+    WorkerUnreachable,
 }

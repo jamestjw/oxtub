@@ -4,7 +4,11 @@ use std::{
 };
 
 use crate::{
-    buffer::{frame::{Frame, FrameMeta}, page::Page, replacer::Replacer},
+    buffer::{
+        frame::{Frame, FrameMeta},
+        page::Page,
+        replacer::Replacer,
+    },
     storage::disk::disk_manager::DiskManager,
 };
 

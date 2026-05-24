@@ -3,5 +3,6 @@ mod common;
 mod storage;
 
 fn main() {
-    println!("Hello, world!");
+    tracing_subscriber::fmt::init();
+    tracing::info!("starting oxtub");
 }

@@ -7,16 +7,18 @@ use crate::storage::disk::{
     config::DEFAULT_PAGE_SIZE, disk_manager::DiskManager, error::DiskSchedulerError,
 };
 
-struct PageBuffer {
+pub struct PageBuffer {
     data: [u8; DEFAULT_PAGE_SIZE],
 }
 
-impl PageBuffer {
-    pub fn new() -> Self {
+impl Default for PageBuffer {
+    fn default() -> Self {
         Self {
             data: [0; DEFAULT_PAGE_SIZE],
         }
     }
+}
+impl PageBuffer {
     pub fn data(&self) -> &[u8] {
         &self.data
     }
@@ -37,7 +39,7 @@ enum DiskRequest {
     },
 }
 
-struct DiskScheduler {
+pub struct DiskScheduler {
     worker: Option<JoinHandle<()>>,
     sender: Option<Sender<DiskRequest>>,
 }
@@ -46,14 +48,31 @@ impl DiskScheduler {
     pub fn new(mut disk_manager: DiskManager) -> Self {
         let (sender, receiver) = channel::<DiskRequest>();
         let worker = std::thread::spawn(move || {
+            // receiver returns error when all senders are closed, i.e. channel
+            // is closed
             while let Ok(request) = receiver.recv() {
                 match request {
-                    DiskRequest::Read { page_id, response } => {}
+                    DiskRequest::Read { page_id, response } => {
+                        let mut buffer = PageBuffer::default();
+                        let result = disk_manager
+                            .read_page(page_id, buffer.data_mut())
+                            .map(|_| buffer)
+                            .map_err(DiskSchedulerError::Disk);
+
+                        if let Err(e) = response.send(result) {
+                            tracing::warn!(page_id, error = %e, "disk request response receiver was dropped")
+                        }
+                    }
                     DiskRequest::Write {
                         page_id,
                         data,
                         response,
-                    } => {}
+                    } => {
+                        let result = disk_manager
+                            .write_page(page_id, data.data())
+                            .map_err(DiskSchedulerError::Disk);
+                        let _ = response.send(result);
+                    }
                 }
             }
         });
@@ -63,13 +82,52 @@ impl DiskScheduler {
             sender: Some(sender),
         }
     }
+
+    pub fn read_page(&self, page_id: usize) -> Result<PageBuffer, DiskSchedulerError> {
+        match &self.sender {
+            None => Err(DiskSchedulerError::WorkerStopped),
+            Some(sender) => {
+                let (resp_sender, resp_receiver) = channel();
+                if let Err(_) = sender.send(DiskRequest::Read {
+                    page_id,
+                    response: resp_sender,
+                }) {
+                    return Err(DiskSchedulerError::WorkerUnreachable);
+                }
+
+                match resp_receiver.recv() {
+                    Err(_) => Err(DiskSchedulerError::WorkerStopped),
+                    Ok(res) => res,
+                }
+            }
+        }
+    }
+
+    pub fn write_page(&self, page_id: usize, data: PageBuffer) -> Result<(), DiskSchedulerError> {
+        match &self.sender {
+            None => Err(DiskSchedulerError::WorkerStopped),
+            Some(sender) => {
+                let (resp_sender, resp_receiver) = channel();
+                if let Err(_) = sender.send(DiskRequest::Write {
+                    page_id,
+                    data,
+                    response: resp_sender,
+                }) {
+                    return Err(DiskSchedulerError::WorkerUnreachable);
+                }
+
+                match resp_receiver.recv() {
+                    Err(_) => Err(DiskSchedulerError::WorkerStopped),
+                    Ok(res) => res,
+                }
+            }
+        }
+    }
 }
 
 impl Drop for DiskScheduler {
     fn drop(&mut self) {
-        {
-            self.sender.take();
-        }
+        self.sender.take();
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();
         }
