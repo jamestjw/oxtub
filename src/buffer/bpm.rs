@@ -7,7 +7,7 @@ use crate::{
     buffer::{
         frame::{Frame, FrameMeta},
         page::Page,
-        page_guard::WritePageGuard,
+        page_guard::{ReadPageGuard, WritePageGuard},
         replacer::Replacer,
     },
     storage::disk::{
@@ -135,6 +135,8 @@ impl BufferPoolManager {
 
         let (frame_id, mut write_guard) = self.acquire_frame_for_page_load(&mut state)?;
 
+        // TODO: might have to rollback state correctly if this fails, though failure
+        // should never really occur
         let buffer = self.inner.disk_scheduler.read_page(page_id)?;
         write_guard.data_mut().copy_from_slice(buffer.data());
         write_guard.set_page_id(Some(page_id));
@@ -146,6 +148,44 @@ impl BufferPoolManager {
             frame_id,
             page_id,
             write_guard,
+        ))
+    }
+
+    pub fn read_page(&self, page_id: usize) -> Result<ReadPageGuard<'_>, BufferPoolError> {
+        let mut state = self.inner.state.lock().unwrap();
+
+        // Try to get a frame that we have already loaded the page into
+        if let Some(frame_id) = Self::pin_loaded_page(&mut state, page_id) {
+            drop(state);
+
+            let read_guard = self.inner.frames[frame_id].page.read().unwrap();
+
+            return Ok(ReadPageGuard::new(
+                &self.inner,
+                frame_id,
+                page_id,
+                read_guard,
+            ));
+        }
+
+        let (frame_id, mut write_guard) = self.acquire_frame_for_page_load(&mut state)?;
+
+        // TODO: might have to rollback state correctly if this fails, though failure
+        // should never really occur
+        let buffer = self.inner.disk_scheduler.read_page(page_id)?;
+        write_guard.data_mut().copy_from_slice(buffer.data());
+        write_guard.set_page_id(Some(page_id));
+
+        Self::publish_loaded_page(&mut state, page_id, frame_id);
+
+        drop(write_guard);
+        let read_guard = self.inner.frames[frame_id].page.read().unwrap();
+
+        Ok(ReadPageGuard::new(
+            &self.inner,
+            frame_id,
+            page_id,
+            read_guard,
         ))
     }
 
@@ -179,34 +219,44 @@ impl BufferPoolManager {
         match state.free_list.pop() {
             Some(frame_id) => Ok((frame_id, self.inner.frames[frame_id].page.write().unwrap())),
             // No free frame available, try to evict a page
-            None => match state.replacer.evict() {
-                Some(frame_id) => {
-                    let victim_page_id = state.frame_metas[frame_id]
-                        .page_id
-                        .expect("frame has no page id");
-                    let write_guard = self.inner.frames[frame_id].page.write().unwrap();
+            None => {
+                let frame_id = state
+                    .replacer
+                    .evict()
+                    .ok_or(BufferPoolError::NoAvailableFrame)?;
+                let victim_page_id = state.frame_metas[frame_id]
+                    .page_id
+                    .expect("frame has no page id");
+                let write_guard = self.inner.frames[frame_id].page.write().unwrap();
 
-                    // need to flush this page to disk before we re-use its frame
-                    if state.frame_metas[frame_id].is_dirty {
-                        let mut data_arr = [0u8; DEFAULT_PAGE_SIZE];
-                        data_arr.copy_from_slice(write_guard.data());
-                        // TODO: a smart optimisation to increase buffer pool throughput
-                        // is to 'reserve' the frame and remove the victim page from the page
-                        // table, give up the BPM mutex, do the required I/O and then re-acquire
-                        // the lock. The key idea is that once the frame is required, even if we
-                        // give up the mutex, no one else will be able to 'take it' from us.
-                        self.inner
-                            .disk_scheduler
-                            .write_page(victim_page_id, PageBuffer::of_data(data_arr))?;
+                // need to flush this page to disk before we re-use its frame
+                if state.frame_metas[frame_id].is_dirty {
+                    let mut data_arr = [0u8; DEFAULT_PAGE_SIZE];
+                    data_arr.copy_from_slice(write_guard.data());
+                    // TODO: a smart optimisation to increase buffer pool throughput
+                    // is to 'reserve' the frame and remove the victim page from the page
+                    // table, give up the BPM mutex, do the required I/O and then re-acquire
+                    // the lock. The key idea is that once the frame is required, even if we
+                    // give up the mutex, no one else will be able to 'take it' from us.
+                    if let Err(err) = self
+                        .inner
+                        .disk_scheduler
+                        .write_page(victim_page_id, PageBuffer::of_data(data_arr))
+                    {
+                        // Roll back replacer state removed by evict
+                        // TODO: this doesn't put things back in the exact state as things
+                        // were before because of the replacer's internal algorithm
+                        state.replacer.record_access(frame_id, victim_page_id);
+                        state.replacer.set_evictable(frame_id, true);
+                        return Err(err.into());
                     }
-
-                    state.page_table.remove(&victim_page_id);
-                    state.frame_metas[frame_id].reset();
-
-                    Ok((frame_id, write_guard))
                 }
-                None => Err(BufferPoolError::NoAvailableFrame),
-            },
+
+                state.page_table.remove(&victim_page_id);
+                state.frame_metas[frame_id].reset();
+
+                Ok((frame_id, write_guard))
+            }
         }
     }
 }

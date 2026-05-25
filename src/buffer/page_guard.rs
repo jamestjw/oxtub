@@ -37,6 +37,22 @@ impl std::ops::Deref for ReadPageGuard<'_> {
     }
 }
 
+impl<'a> ReadPageGuard<'a> {
+    pub(crate) fn new(
+        bpm: &'a BufferPoolInner,
+        frame_id: usize,
+        page_id: usize,
+        guard: RwLockReadGuard<'a, Page>,
+    ) -> Self {
+        Self {
+            bpm,
+            page_id,
+            frame_id,
+            guard,
+        }
+    }
+}
+
 impl<'a> WritePageGuard<'a> {
     pub(crate) fn new(
         bpm: &'a BufferPoolInner,
