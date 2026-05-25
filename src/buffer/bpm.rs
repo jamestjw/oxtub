@@ -9,6 +9,7 @@ use crate::{
     storage::disk::{
         config::DEFAULT_PAGE_SIZE,
         disk_scheduler::{DiskScheduler, PageBuffer},
+        error::BufferPoolError,
     },
 };
 
@@ -51,7 +52,7 @@ impl BufferPoolManager {
     // If the page is pinned in the buffer pool, this function does nothing and
     // returns `false`. Otherwise, this function removes the page from both disk
     // and memory (if it is still in the buffer pool), returning `true`.
-    pub fn delete_page(&self, page_id: usize) -> bool {
+    pub fn delete_page(&self, page_id: usize) -> Result<(), BufferPoolError> {
         let mut state = self.inner.state.lock().unwrap();
 
         match state.page_table.get(&page_id).copied() {
@@ -60,7 +61,7 @@ impl BufferPoolManager {
             }
             Some(frame_id) => {
                 if state.frame_metas[frame_id].pin_count > 0 {
-                    return false;
+                    return Err(BufferPoolError::PagePinned(page_id));
                 }
 
                 state.replacer.remove(frame_id);
@@ -78,7 +79,7 @@ impl BufferPoolManager {
             tracing::warn!(page_id, error = %e,  "could not send delete page req to scheduler");
         }
 
-        true
+        Ok(())
     }
 
     /**
@@ -101,7 +102,10 @@ impl BufferPoolManager {
      * - All frames are occupied, so we need to try to evict something using the replacement
      *   algorithm, then we load the page into the now free frame and return a guard for it.
      */
-    pub fn write_page(&self, page_id: usize) -> Option<WritePageGuard<'_>> {
+    pub fn write_page(
+        &self,
+        page_id: usize,
+    ) -> Result<WritePageGuard<'_>, BufferPoolError> {
         let mut state = self.inner.state.lock().unwrap();
 
         // Try to get a frame that we have already loaded the page into
@@ -121,7 +125,7 @@ impl BufferPoolManager {
 
             let write_guard = self.inner.frames[frame_id].page.write().unwrap();
 
-            return Some(WritePageGuard::new(
+            return Ok(WritePageGuard::new(
                 &self.inner,
                 frame_id,
                 page_id,
@@ -137,7 +141,7 @@ impl BufferPoolManager {
                 Some(frame_id) => {
                     let victim_page_id = state.frame_metas[frame_id]
                         .page_id
-                        .expect("frame must contain page");
+                        .ok_or(BufferPoolError::PageNotFound(page_id))?;
                     let write_guard = self.inner.frames[frame_id].page.write().unwrap();
 
                     // need to flush this page to disk before we re-use its frame
@@ -151,8 +155,7 @@ impl BufferPoolManager {
                         // give up the mutex, no one else will be able to 'take it' from us.
                         self.inner
                             .disk_scheduler
-                            .write_page(victim_page_id, PageBuffer::of_data(data_arr))
-                            .expect("could not flush evicted page to disk");
+                            .write_page(victim_page_id, PageBuffer::of_data(data_arr))?;
                     }
 
                     state.page_table.remove(&victim_page_id);
@@ -165,13 +168,9 @@ impl BufferPoolManager {
         };
 
         match frame_to_use {
-            None => None,
+            None => Err(BufferPoolError::NoAvailableFrame),
             Some((frame_id, mut write_guard)) => {
-                let buffer = self
-                    .inner
-                    .disk_scheduler
-                    .read_page(page_id)
-                    .expect("could not flush evicted page to disk");
+                let buffer = self.inner.disk_scheduler.read_page(page_id)?;
 
                 write_guard.data_mut().copy_from_slice(buffer.data());
                 write_guard.set_page_id(Some(page_id));
@@ -183,7 +182,7 @@ impl BufferPoolManager {
                 state.replacer.record_access(frame_id, page_id);
                 state.replacer.set_evictable(frame_id, false);
 
-                Some(WritePageGuard::new(
+                Ok(WritePageGuard::new(
                     &self.inner,
                     frame_id,
                     page_id,
