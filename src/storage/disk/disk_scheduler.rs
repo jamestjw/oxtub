@@ -19,6 +19,9 @@ impl Default for PageBuffer {
     }
 }
 impl PageBuffer {
+    pub fn of_data(data: [u8; DEFAULT_PAGE_SIZE]) -> Self {
+        Self { data }
+    }
     pub fn data(&self) -> &[u8] {
         &self.data
     }

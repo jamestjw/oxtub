@@ -16,10 +16,10 @@ impl Page {
         }
     }
 
-    pub fn data(&self) -> &[u8] {
+    pub fn data(&self) -> &[u8; DEFAULT_PAGE_SIZE] {
         &self.data.0
     }
-    pub fn data_mut(&mut self) -> &mut [u8] {
+    pub fn data_mut(&mut self) -> &mut [u8; DEFAULT_PAGE_SIZE] {
         &mut self.data.0
     }
     pub fn page_id(&self) -> Option<usize> {
