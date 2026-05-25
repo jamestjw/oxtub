@@ -37,6 +37,9 @@ enum DiskRequest {
         data: PageBuffer,
         response: Sender<Result<(), DiskSchedulerError>>,
     },
+    Delete {
+        page_id: usize,
+    },
 }
 
 pub struct DiskScheduler {
@@ -72,6 +75,11 @@ impl DiskScheduler {
                             .write_page(page_id, data.data())
                             .map_err(DiskSchedulerError::Disk);
                         let _ = response.send(result);
+                    }
+                    DiskRequest::Delete { page_id } => {
+                        if let Err(e) = disk_manager.delete_page(page_id) {
+                            tracing::warn!(page_id, error = %e, "could not delete page")
+                        };
                     }
                 }
             }
@@ -121,6 +129,15 @@ impl DiskScheduler {
                     Ok(res) => res,
                 }
             }
+        }
+    }
+
+    pub fn delete_page(&self, page_id: usize) -> Result<(), DiskSchedulerError> {
+        match &self.sender {
+            None => Err(DiskSchedulerError::WorkerStopped),
+            Some(sender) => sender
+                .send(DiskRequest::Delete { page_id })
+                .map_err(|_| DiskSchedulerError::WorkerUnreachable),
         }
     }
 }

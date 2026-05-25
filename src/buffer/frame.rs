@@ -11,3 +11,11 @@ pub(crate) struct FrameMeta {
     pub(crate) pin_count: usize,
     pub(crate) is_dirty: bool,
 }
+
+impl FrameMeta {
+    pub fn reset(&mut self) {
+        self.page_id = None;
+        self.pin_count = 0;
+        self.is_dirty = false;
+    }
+}
