@@ -24,8 +24,6 @@ pub enum DiskSchedulerError {
 pub enum BufferPoolError {
     #[error("no available frame in buffer pool")]
     NoAvailableFrame,
-    #[error("page {0} not found")]
-    PageNotFound(usize),
     #[error("page {0} is pinned")]
     PagePinned(usize),
     #[error("disk scheduler error: {0}")]

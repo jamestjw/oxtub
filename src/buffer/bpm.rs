@@ -1,8 +1,12 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, RwLockWriteGuard},
+};
 
 use crate::{
     buffer::{
         frame::{Frame, FrameMeta},
+        page::Page,
         page_guard::WritePageGuard,
         replacer::Replacer,
     },
@@ -71,6 +75,9 @@ impl BufferPoolManager {
             }
         }
 
+        // Don't hold the mutex while doing disk I/O
+        drop(state);
+
         // If the page doesn't exist or the scheduler doesn't successfully delete the
         // page, it fails with a log. For now, this doesn't stop the DB's normal operations
         if let Err(e) = self.inner.disk_scheduler.delete_page(page_id) {
@@ -84,7 +91,6 @@ impl BufferPoolManager {
 
     /**
      * Acquires an optional write-locked guard over a page of data.
-     * If it is not possible to bring the page of data into memory, this function will return None
      *
      * Page data can _only_ be accessed via page guards. Users of this `BufferPoolManager`
      * are expected to acquire either a `ReadPageGuard` or a `WritePageGuard` depending on the mode
@@ -102,21 +108,15 @@ impl BufferPoolManager {
      * - All frames are occupied, so we need to try to evict something using the replacement
      *   algorithm, then we load the page into the now free frame and return a guard for it.
      */
-    pub fn write_page(
-        &self,
-        page_id: usize,
-    ) -> Result<WritePageGuard<'_>, BufferPoolError> {
+    pub fn write_page(&self, page_id: usize) -> Result<WritePageGuard<'_>, BufferPoolError> {
         let mut state = self.inner.state.lock().unwrap();
 
         // Try to get a frame that we have already loaded the page into
-        if let Some(frame_id) = state.page_table.get(&page_id).copied() {
+        if let Some(frame_id) = Self::pin_loaded_page(&mut state, page_id) {
             // Page is loaded in a frame, this can mean two things:
             // - no one is using it right now, and it just hasn't been evicted yet
             // - someone is reading/writing to it, so when we try to get the read-write lock
             //   this may block
-            state.frame_metas[frame_id].pin_count += 1;
-            state.replacer.record_access(frame_id, page_id);
-            state.replacer.set_evictable(frame_id, false);
 
             // While we get the read-write lock, we may block. We might need to give up the latch
             // for the buffer pool state, otherwise the other threads that are holding on the
@@ -133,15 +133,57 @@ impl BufferPoolManager {
             ));
         }
 
+        let (frame_id, mut write_guard) = self.acquire_frame_for_page_load(&mut state)?;
+
+        let buffer = self.inner.disk_scheduler.read_page(page_id)?;
+        write_guard.data_mut().copy_from_slice(buffer.data());
+        write_guard.set_page_id(Some(page_id));
+
+        Self::publish_loaded_page(&mut state, page_id, frame_id);
+
+        Ok(WritePageGuard::new(
+            &self.inner,
+            frame_id,
+            page_id,
+            write_guard,
+        ))
+    }
+
+    fn pin_loaded_page(state: &mut BufferPoolState, page_id: usize) -> Option<usize> {
+        match state.page_table.get(&page_id).copied() {
+            Some(frame_id) => {
+                state.frame_metas[frame_id].pin_count += 1;
+                state.replacer.record_access(frame_id, page_id);
+                state.replacer.set_evictable(frame_id, false);
+
+                Some(frame_id)
+            }
+            None => None,
+        }
+    }
+
+    fn publish_loaded_page(state: &mut BufferPoolState, page_id: usize, frame_id: usize) {
+        state.page_table.insert(page_id, frame_id);
+        state.frame_metas[frame_id].pin_count = 1;
+        state.frame_metas[frame_id].is_dirty = false;
+        state.frame_metas[frame_id].page_id = Some(page_id);
+        state.replacer.record_access(frame_id, page_id);
+        state.replacer.set_evictable(frame_id, false);
+    }
+
+    fn acquire_frame_for_page_load(
+        &self,
+        state: &mut BufferPoolState,
+    ) -> Result<(usize, RwLockWriteGuard<'_, Page>), BufferPoolError> {
         // Try to get a free frame to load the page into
-        let frame_to_use = match state.free_list.pop() {
-            Some(frame_id) => Some((frame_id, self.inner.frames[frame_id].page.write().unwrap())),
+        match state.free_list.pop() {
+            Some(frame_id) => Ok((frame_id, self.inner.frames[frame_id].page.write().unwrap())),
             // No free frame available, try to evict a page
             None => match state.replacer.evict() {
                 Some(frame_id) => {
                     let victim_page_id = state.frame_metas[frame_id]
                         .page_id
-                        .ok_or(BufferPoolError::PageNotFound(page_id))?;
+                        .expect("frame has no page id");
                     let write_guard = self.inner.frames[frame_id].page.write().unwrap();
 
                     // need to flush this page to disk before we re-use its frame
@@ -161,34 +203,10 @@ impl BufferPoolManager {
                     state.page_table.remove(&victim_page_id);
                     state.frame_metas[frame_id].reset();
 
-                    Some((frame_id, write_guard))
+                    Ok((frame_id, write_guard))
                 }
-                None => None,
+                None => Err(BufferPoolError::NoAvailableFrame),
             },
-        };
-
-        match frame_to_use {
-            None => Err(BufferPoolError::NoAvailableFrame),
-            Some((frame_id, mut write_guard)) => {
-                let buffer = self.inner.disk_scheduler.read_page(page_id)?;
-
-                write_guard.data_mut().copy_from_slice(buffer.data());
-                write_guard.set_page_id(Some(page_id));
-
-                state.page_table.insert(page_id, frame_id);
-                state.frame_metas[frame_id].pin_count = 1;
-                state.frame_metas[frame_id].is_dirty = false;
-                state.frame_metas[frame_id].page_id = Some(page_id);
-                state.replacer.record_access(frame_id, page_id);
-                state.replacer.set_evictable(frame_id, false);
-
-                Ok(WritePageGuard::new(
-                    &self.inner,
-                    frame_id,
-                    page_id,
-                    write_guard,
-                ))
-            }
         }
     }
 }
