@@ -51,6 +51,10 @@ impl<'a> ReadPageGuard<'a> {
             guard,
         }
     }
+
+    pub fn page_id(&self) -> usize {
+        self.page_id
+    }
 }
 
 impl<'a> WritePageGuard<'a> {
@@ -66,6 +70,10 @@ impl<'a> WritePageGuard<'a> {
             frame_id,
             guard,
         }
+    }
+
+    pub fn page_id(&self) -> usize {
+        self.page_id
     }
 }
 
