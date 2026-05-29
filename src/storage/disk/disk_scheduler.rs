@@ -3,12 +3,15 @@ use std::{
     thread::JoinHandle,
 };
 
-use crate::storage::disk::{
-    config::DEFAULT_PAGE_SIZE, disk_manager::DiskManager, error::DiskSchedulerError,
+use crate::{
+    buffer::page::PageBytes,
+    storage::disk::{
+        config::DEFAULT_PAGE_SIZE, disk_manager::DiskManager, error::DiskSchedulerError,
+    },
 };
 
 pub struct PageBuffer {
-    data: [u8; DEFAULT_PAGE_SIZE],
+    data: PageBytes,
 }
 
 impl Default for PageBuffer {
@@ -19,7 +22,7 @@ impl Default for PageBuffer {
     }
 }
 impl PageBuffer {
-    pub fn of_data(data: [u8; DEFAULT_PAGE_SIZE]) -> Self {
+    pub fn of_data(data: PageBytes) -> Self {
         Self { data }
     }
     pub fn data(&self) -> &[u8] {

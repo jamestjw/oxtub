@@ -6,7 +6,7 @@ use std::{
 use crate::{
     buffer::{
         frame::{Frame, FrameMeta},
-        page::Page,
+        page::{INVALID_PAGE_ID, Page},
         page_guard::{ReadPageGuard, WritePageGuard},
         replacer::{LruKReplacer, Replacer},
     },
@@ -63,7 +63,7 @@ impl BufferPoolManager {
                     frame_metas,
                     free_list: (0..pool_size).rev().collect(),
                     replacer: Box::new(LruKReplacer::new(pool_size, 2)),
-                    next_page_id: 0,
+                    next_page_id: INVALID_PAGE_ID + 1,
                 }),
                 frames,
                 disk_scheduler: DiskScheduler::new(disk_manager),

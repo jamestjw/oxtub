@@ -14,6 +14,16 @@ pub struct BTreePageHeader {
 }
 
 impl BTreePageHeader {
+    pub fn init(&mut self, page_type: u8, max_size: usize) {
+        assert!(max_size <= u16::MAX as usize);
+
+        self.page_type = page_type;
+        self._padding = 0;
+        self.current_size = 0;
+        self.max_size = max_size as u16;
+        self._reserved = 0;
+    }
+
     pub fn is_leaf(&self) -> bool {
         self.page_type == PAGE_TYPE_LEAF
     }

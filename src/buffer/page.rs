@@ -1,11 +1,14 @@
 use crate::storage::disk::config::DEFAULT_PAGE_SIZE;
 
+pub const INVALID_PAGE_ID: usize = 0;
+pub type PageBytes = [u8; DEFAULT_PAGE_SIZE];
+
 #[repr(align(8))]
-pub struct PageData<const N: usize>(pub [u8; N]);
+pub struct PageData(pub PageBytes);
 
 pub struct Page {
     page_id: Option<usize>,
-    data: PageData<DEFAULT_PAGE_SIZE>,
+    data: PageData,
 }
 
 impl Page {
@@ -16,10 +19,10 @@ impl Page {
         }
     }
 
-    pub fn data(&self) -> &[u8; DEFAULT_PAGE_SIZE] {
+    pub fn data(&self) -> &PageBytes {
         &self.data.0
     }
-    pub fn data_mut(&mut self) -> &mut [u8; DEFAULT_PAGE_SIZE] {
+    pub fn data_mut(&mut self) -> &mut PageBytes {
         &mut self.data.0
     }
     pub fn page_id(&self) -> Option<usize> {
