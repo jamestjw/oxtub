@@ -8,7 +8,7 @@ pub struct BTreePageHeader {
     // 8 byte header, we do explicit padding for clarity
     page_type: u8,
     _padding: u8,
-    current_size: u16,
+    pub(crate) current_size: u16,
     pub(crate) max_size: u16,
     _reserved: u16,
 }

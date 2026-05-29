@@ -5,7 +5,12 @@ use bytemuck::Pod;
 use crate::{
     buffer::page::{INVALID_PAGE_ID, PageBytes},
     common::alignment::align_up,
-    storage::page::b_tree_page_header::{BTreePageHeader, PAGE_TYPE_LEAF},
+    storage::{
+        disk::config::DEFAULT_PAGE_SIZE,
+        index::comparator::KeyComparator,
+        page::b_tree_page_header::{BTreePageHeader, PAGE_TYPE_LEAF},
+        rid::Rid,
+    },
 };
 
 pub struct BTreeLeafPage<'a, K, const TOMB_CAP: usize> {
@@ -70,15 +75,32 @@ impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
         self.header().common.max_size as usize
     }
 
+    fn curr_size(&self) -> usize {
+        self.header().common.current_size as usize
+    }
+
     fn tombstones(&self) -> &[TombstoneIndex] {
         let start = Self::TOMBSTONES_OFFSET;
         let end = start + TOMB_CAP * size_of::<TombstoneIndex>();
         bytemuck::cast_slice(&self.data[start..end])
     }
 
+    fn values_offset(&self) -> usize {
+        align_up(
+            Self::KEYS_OFFSET + self.max_size() * size_of::<K>(),
+            align_of::<Rid>(),
+        )
+    }
+
     fn keys(&self) -> &[K] {
         let start = Self::KEYS_OFFSET;
         let end = start + self.max_size() * size_of::<K>();
+        bytemuck::cast_slice(&self.data[start..end])
+    }
+
+    fn values(&self) -> &[Rid] {
+        let start = self.values_offset();
+        let end = start + self.max_size() * size_of::<Rid>();
         bytemuck::cast_slice(&self.data[start..end])
     }
 
@@ -89,9 +111,20 @@ impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
             .map(|idx| keys[usize::from(*idx)])
             .collect()
     }
+
+    pub fn key_at(&self, idx: usize) -> &K {
+        assert!(idx < self.curr_size());
+        &self.keys()[idx]
+    }
+
+    pub fn value_at(&self, idx: usize) -> &Rid {
+        assert!(idx < self.curr_size());
+        &self.values()[idx]
+    }
 }
 
 impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
+    pub const MAX_SIZE: usize = leaf_page_max_size::<K, TOMB_CAP>();
     // fn header(&self) -> &BTreeLeafHeader {
     //     let header_bytes = &self.data[..size_of::<BTreeLeafHeader>()];
     //     bytemuck::from_bytes(header_bytes)
@@ -103,12 +136,12 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         }
     }
 
-    pub fn init(data: &'a mut PageBytes, max_size: usize) -> Self {
+    pub fn init(data: &'a mut PageBytes) -> Self {
         data.fill(0);
 
         let mut page = Self::from_data(data);
         let header = page.header_mut();
-        header.common.init(PAGE_TYPE_LEAF, max_size);
+        header.common.init(PAGE_TYPE_LEAF, Self::MAX_SIZE);
         header.next_page_id = INVALID_PAGE_ID as u32;
         header.num_tombstones = 0;
         header._reserved = 0;
@@ -134,6 +167,35 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
 
         self.header_mut().next_page_id = page_id as u32;
     }
+
+    pub fn find_insert_pos<C>(&self, key: &K, cmp: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        todo!()
+    }
+}
+
+const fn leaf_page_max_size<K, const TOMB_CAP: usize>() -> usize {
+    let mut n = 0;
+
+    loop {
+        let next = n + 1;
+
+        let tombstones_end = size_of::<BTreeLeafHeader>() + TOMB_CAP * size_of::<TombstoneIndex>();
+
+        let keys_offset = align_up(tombstones_end, align_of::<K>());
+        let keys_end = keys_offset + next * size_of::<K>();
+
+        let values_offset = align_up(keys_end, align_of::<Rid>());
+        let values_end = values_offset + next * size_of::<Rid>();
+
+        if values_end > DEFAULT_PAGE_SIZE {
+            return n;
+        }
+
+        n = next;
+    }
 }
 
 #[cfg(test)]
@@ -147,12 +209,12 @@ mod tests {
         let mut data = [0xff; DEFAULT_PAGE_SIZE];
 
         {
-            let _leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data, 128);
+            let _leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
         }
 
         let leaf = BTreeLeafPage::<u64, 8>::from_data(&data);
         assert!(leaf.header().common.is_leaf());
-        assert_eq!(leaf.max_size(), 128);
+        assert_eq!(leaf.max_size(), BTreeLeafPageMut::<u64, 8>::MAX_SIZE);
         assert_eq!(leaf.get_next_page_id(), INVALID_PAGE_ID);
         assert_eq!(leaf.get_tombstone_count(), 0);
     }
