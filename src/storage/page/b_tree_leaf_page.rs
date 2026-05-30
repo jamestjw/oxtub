@@ -46,10 +46,14 @@ pub struct BTreeLeafHeader {
 impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
     const HEADER_SIZE: usize = size_of::<BTreeLeafHeader>();
     const TOMBSTONES_OFFSET: usize = Self::HEADER_SIZE;
-    const KEYS_OFFSET: usize = align_up(
+    const ENTRY_ALIGN: usize = max_usize(align_of::<K>(), align_of::<Rid>());
+    const ENTRIES_OFFSET: usize = align_up(
         Self::TOMBSTONES_OFFSET + TOMB_CAP * size_of::<TombstoneIndex>(),
-        align_of::<K>(),
+        Self::ENTRY_ALIGN,
     );
+    const ENTRY_RID_OFFSET: usize = align_up(size_of::<K>(), align_of::<Rid>());
+    const ENTRY_SIZE: usize =
+        align_up(Self::ENTRY_RID_OFFSET + size_of::<Rid>(), Self::ENTRY_ALIGN);
 
     pub fn from_data(data: &'a PageBytes) -> Self {
         Self {
@@ -85,46 +89,53 @@ impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
         bytemuck::cast_slice(&self.data[start..end])
     }
 
-    fn values_offset(&self) -> usize {
-        align_up(
-            Self::KEYS_OFFSET + self.max_size() * size_of::<K>(),
-            align_of::<Rid>(),
-        )
+    fn entry_offset(idx: usize) -> usize {
+        Self::ENTRIES_OFFSET + idx * Self::ENTRY_SIZE
     }
 
-    fn keys(&self) -> &[K] {
-        let start = Self::KEYS_OFFSET;
-        let end = start + self.max_size() * size_of::<K>();
-        bytemuck::cast_slice(&self.data[start..end])
+    fn key_ref(&self, idx: usize) -> &K {
+        let start = Self::entry_offset(idx);
+        let end = start + size_of::<K>();
+        bytemuck::from_bytes(&self.data[start..end])
     }
 
-    fn values(&self) -> &[Rid] {
-        let start = self.values_offset();
-        let end = start + self.max_size() * size_of::<Rid>();
-        bytemuck::cast_slice(&self.data[start..end])
+    fn rid_ref(&self, idx: usize) -> &Rid {
+        let start = Self::entry_offset(idx) + Self::ENTRY_RID_OFFSET;
+        let end = start + size_of::<Rid>();
+        bytemuck::from_bytes(&self.data[start..end])
     }
 
     pub fn get_tombstoned_keys(&self) -> Vec<K> {
-        let keys = self.keys();
         self.tombstones()[..self.get_tombstone_count()]
             .iter()
-            .map(|idx| keys[usize::from(*idx)])
+            .map(|idx| *self.key_ref(usize::from(*idx)))
             .collect()
     }
 
     pub fn key_at(&self, idx: usize) -> &K {
         assert!(idx < self.curr_size());
-        &self.keys()[idx]
+        self.key_ref(idx)
     }
 
     pub fn value_at(&self, idx: usize) -> &Rid {
         assert!(idx < self.curr_size());
-        &self.values()[idx]
+        self.rid_ref(idx)
     }
 }
 
 impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
     pub const MAX_SIZE: usize = leaf_page_max_size::<K, TOMB_CAP>();
+    const HEADER_SIZE: usize = size_of::<BTreeLeafHeader>();
+    const TOMBSTONES_OFFSET: usize = Self::HEADER_SIZE;
+    const ENTRY_ALIGN: usize = max_usize(align_of::<K>(), align_of::<Rid>());
+    const ENTRIES_OFFSET: usize = align_up(
+        Self::TOMBSTONES_OFFSET + TOMB_CAP * size_of::<TombstoneIndex>(),
+        Self::ENTRY_ALIGN,
+    );
+    const ENTRY_RID_OFFSET: usize = align_up(size_of::<K>(), align_of::<Rid>());
+    const ENTRY_SIZE: usize =
+        align_up(Self::ENTRY_RID_OFFSET + size_of::<Rid>(), Self::ENTRY_ALIGN);
+
     // fn header(&self) -> &BTreeLeafHeader {
     //     let header_bytes = &self.data[..size_of::<BTreeLeafHeader>()];
     //     bytemuck::from_bytes(header_bytes)
@@ -149,9 +160,34 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         page
     }
 
+    fn header(&self) -> &BTreeLeafHeader {
+        let header_bytes = &self.data[..size_of::<BTreeLeafHeader>()];
+        bytemuck::from_bytes(header_bytes)
+    }
+
     fn header_mut(&mut self) -> &mut BTreeLeafHeader {
         let header_bytes = &mut self.data[..size_of::<BTreeLeafHeader>()];
         bytemuck::from_bytes_mut(header_bytes)
+    }
+
+    pub fn max_size(&self) -> usize {
+        self.header().common.max_size as usize
+    }
+
+    fn entry_offset(idx: usize) -> usize {
+        Self::ENTRIES_OFFSET + idx * Self::ENTRY_SIZE
+    }
+
+    fn key_ref(&self, idx: usize) -> &K {
+        let start = Self::entry_offset(idx);
+        let end = start + size_of::<K>();
+        bytemuck::from_bytes(&self.data[start..end])
+    }
+
+    fn rid_ref(&self, idx: usize) -> &Rid {
+        let start = Self::entry_offset(idx) + Self::ENTRY_RID_OFFSET;
+        let end = start + size_of::<Rid>();
+        bytemuck::from_bytes(&self.data[start..end])
     }
 
     // pub fn get_tombstone_count(&self) -> usize {
@@ -168,12 +204,65 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         self.header_mut().next_page_id = page_id as u32;
     }
 
-    pub fn find_insert_pos<C>(&self, key: &K, cmp: &C) -> usize
+    pub fn find_pos<C>(&self, key: &K, c: &C) -> usize
     where
         C: KeyComparator<K>,
     {
-        todo!()
+        let mut left = 0;
+        let mut right = self.header().common.current_size as usize;
+
+        while left < right {
+            let mid = left + ((right - left) / 2);
+
+            match c.compare(self.key_ref(mid), key) {
+                std::cmp::Ordering::Less => {
+                    left = mid + 1;
+                }
+                _ => {
+                    right = mid;
+                }
+            }
+        }
+
+        left
     }
+
+    pub fn find_insert_pos<C>(&self, key: &K, rid: &Rid, c: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        let mut left = 0;
+        let mut right = self.header().common.current_size as usize;
+
+        while left < right {
+            let mid = left + ((right - left) / 2);
+
+            let ord = c
+                .compare(self.key_ref(mid), key)
+                .then_with(|| compare_rid(self.rid_ref(mid), rid));
+
+            match ord {
+                std::cmp::Ordering::Less => {
+                    left = mid + 1;
+                }
+                _ => {
+                    right = mid;
+                }
+            }
+        }
+
+        left
+    }
+}
+
+fn compare_rid(a: &Rid, b: &Rid) -> std::cmp::Ordering {
+    a.page_id
+        .cmp(&b.page_id)
+        .then_with(|| a.slot_id.cmp(&b.slot_id))
+}
+
+const fn max_usize(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
 }
 
 const fn leaf_page_max_size<K, const TOMB_CAP: usize>() -> usize {
@@ -184,13 +273,13 @@ const fn leaf_page_max_size<K, const TOMB_CAP: usize>() -> usize {
 
         let tombstones_end = size_of::<BTreeLeafHeader>() + TOMB_CAP * size_of::<TombstoneIndex>();
 
-        let keys_offset = align_up(tombstones_end, align_of::<K>());
-        let keys_end = keys_offset + next * size_of::<K>();
+        let entry_align = max_usize(align_of::<K>(), align_of::<Rid>());
+        let entries_offset = align_up(tombstones_end, entry_align);
+        let entry_rid_offset = align_up(size_of::<K>(), align_of::<Rid>());
+        let entry_size = align_up(entry_rid_offset + size_of::<Rid>(), entry_align);
+        let entries_end = entries_offset + next * entry_size;
 
-        let values_offset = align_up(keys_end, align_of::<Rid>());
-        let values_end = values_offset + next * size_of::<Rid>();
-
-        if values_end > DEFAULT_PAGE_SIZE {
+        if entries_end > DEFAULT_PAGE_SIZE {
             return n;
         }
 
@@ -200,9 +289,19 @@ const fn leaf_page_max_size<K, const TOMB_CAP: usize>() -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use crate::{buffer::page::INVALID_PAGE_ID, storage::disk::config::DEFAULT_PAGE_SIZE};
 
     use super::*;
+
+    struct U64Comparator;
+
+    impl KeyComparator<u64> for U64Comparator {
+        fn compare(&self, a: &u64, b: &u64) -> Ordering {
+            a.cmp(b)
+        }
+    }
 
     #[test]
     fn init_sets_leaf_header_defaults() {
@@ -217,5 +316,80 @@ mod tests {
         assert_eq!(leaf.max_size(), BTreeLeafPageMut::<u64, 8>::MAX_SIZE);
         assert_eq!(leaf.get_next_page_id(), INVALID_PAGE_ID);
         assert_eq!(leaf.get_tombstone_count(), 0);
+    }
+
+    fn write_entry<K: Pod, const TOMB_CAP: usize>(
+        leaf: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>,
+        idx: usize,
+        key: K,
+        rid: Rid,
+    ) {
+        let key_start = BTreeLeafPageMut::<K, TOMB_CAP>::entry_offset(idx);
+        let key_end = key_start + size_of::<K>();
+        leaf.data[key_start..key_end].copy_from_slice(bytemuck::bytes_of(&key));
+
+        let rid_start = key_start + BTreeLeafPageMut::<K, TOMB_CAP>::ENTRY_RID_OFFSET;
+        let rid_end = rid_start + size_of::<Rid>();
+        leaf.data[rid_start..rid_end].copy_from_slice(bytemuck::bytes_of(&rid));
+    }
+
+    #[test]
+    fn full_page_entries_round_trip() {
+        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let max_size = BTreeLeafPageMut::<u32, 8>::MAX_SIZE;
+
+        {
+            let mut leaf = BTreeLeafPageMut::<u32, 8>::init(&mut data);
+            leaf.header_mut().common.current_size = max_size as u16;
+
+            for idx in 0..max_size {
+                write_entry(&mut leaf, idx, idx as u32 + 100, Rid::new(idx + 1, idx));
+            }
+        }
+
+        let leaf = BTreeLeafPage::<u32, 8>::from_data(&data);
+
+        for idx in 0..max_size {
+            assert_eq!(*leaf.key_at(idx), idx as u32 + 100);
+            assert_eq!(*leaf.value_at(idx), Rid::new(idx + 1, idx));
+        }
+    }
+
+    #[test]
+    fn find_pos_returns_first_matching_logical_key() {
+        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
+        leaf.header_mut().common.current_size = 4;
+        write_entry(&mut leaf, 0, 10, Rid::new(1, 1));
+        write_entry(&mut leaf, 1, 20, Rid::new(1, 1));
+        write_entry(&mut leaf, 2, 20, Rid::new(1, 2));
+        write_entry(&mut leaf, 3, 30, Rid::new(1, 1));
+
+        assert_eq!(leaf.find_pos(&20, &U64Comparator), 1);
+        assert_eq!(leaf.find_pos(&25, &U64Comparator), 3);
+    }
+
+    #[test]
+    fn find_insert_pos_uses_rid_as_tiebreaker() {
+        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
+        leaf.header_mut().common.current_size = 4;
+        write_entry(&mut leaf, 0, 10, Rid::new(1, 1));
+        write_entry(&mut leaf, 1, 20, Rid::new(1, 1));
+        write_entry(&mut leaf, 2, 20, Rid::new(1, 3));
+        write_entry(&mut leaf, 3, 30, Rid::new(1, 1));
+
+        assert_eq!(
+            leaf.find_insert_pos(&20, &Rid::new(1, 0), &U64Comparator),
+            1
+        );
+        assert_eq!(
+            leaf.find_insert_pos(&20, &Rid::new(1, 2), &U64Comparator),
+            2
+        );
+        assert_eq!(
+            leaf.find_insert_pos(&20, &Rid::new(1, 4), &U64Comparator),
+            3
+        );
     }
 }
