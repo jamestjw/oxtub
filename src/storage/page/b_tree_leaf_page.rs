@@ -176,6 +176,12 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         bytemuck::from_bytes_mut(header_bytes)
     }
 
+    fn tombstones(&self) -> &[TombstoneIndex] {
+        let start = Self::TOMBSTONES_OFFSET;
+        let end = start + TOMB_CAP * size_of::<TombstoneIndex>();
+        bytemuck::cast_slice(&self.data[start..end])
+    }
+
     fn tombstones_mut(&mut self) -> &mut [TombstoneIndex] {
         let start = Self::TOMBSTONES_OFFSET;
         let end = start + TOMB_CAP * size_of::<TombstoneIndex>();
@@ -188,6 +194,10 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
 
     fn curr_size(&self) -> usize {
         self.header().common.current_size as usize
+    }
+
+    fn num_tombstones(&self) -> usize {
+        self.header().num_tombstones as usize
     }
 
     fn entry_offset(idx: usize) -> usize {
@@ -218,6 +228,14 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         assert!(page_id <= u32::MAX as usize);
 
         self.header_mut().next_page_id = page_id as u32;
+    }
+
+    pub fn set_size(&mut self, size: usize) {
+        self.header_mut().common.current_size = size as u16;
+    }
+
+    pub fn set_num_tombstones(&mut self, size: usize) {
+        self.header_mut().num_tombstones = size as u16;
     }
 
     fn lower_bound_by<F>(&self, compare_entry: F) -> usize
@@ -291,7 +309,7 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
     }
 
     fn write_entry(&mut self, idx: usize, key: &K, rid: &Rid) {
-        assert!(idx < self.max_size());
+        assert!(idx < self.max_size(), "out of bounds");
 
         let key_start = Self::entry_offset(idx);
         let key_end = key_start + size_of::<K>();
@@ -300,6 +318,54 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         let rid_start = key_start + Self::ENTRY_RID_OFFSET;
         let rid_end = rid_start + size_of::<Rid>();
         self.data[rid_start..rid_end].copy_from_slice(bytemuck::bytes_of(rid));
+    }
+
+    // During insertions, if a leaf page is full, we split its entries into a new
+    // sibling page, this function helps move entries to the sibling and resizes
+    // the current page. This function assumes that the recipient is a fresh leaf
+    // page.
+    pub fn move_split_entries_to(&mut self, recipient: &mut Self, start_idx: usize) {
+        let size = self.curr_size();
+        assert!(start_idx < size, "invalid split index");
+
+        let mut recipient_insert_idx = recipient.curr_size();
+
+        // shift entries with index >= start_idx to the other page
+        for i in start_idx..size {
+            if self.is_idx_tombstoned(i) {
+                continue;
+            }
+
+            recipient.write_entry(recipient_insert_idx, self.key_ref(i), self.rid_ref(i));
+            recipient_insert_idx += 1;
+        }
+        recipient.set_size(recipient_insert_idx);
+        recipient.set_num_tombstones(0);
+
+        // compact local tombstones and adjust num_tombstones
+        let mut remaining_tombstone_idx = 0;
+        let num_tombstones = self.num_tombstones();
+        let tombstones = self.tombstones_mut();
+        for i in 0..num_tombstones {
+            if usize::from(tombstones[i]) < start_idx {
+                tombstones[remaining_tombstone_idx] = tombstones[i];
+                remaining_tombstone_idx += 1;
+            }
+        }
+        self.set_num_tombstones(remaining_tombstone_idx);
+        self.set_size(start_idx);
+    }
+
+    fn is_idx_tombstoned(&self, idx: usize) -> bool {
+        let tombstones = self.tombstones();
+
+        for i in 0..self.num_tombstones() {
+            if usize::from(tombstones[i]) == idx {
+                return true;
+            }
+        }
+
+        false
     }
 }
 
@@ -433,6 +499,25 @@ mod tests {
     }
 
     #[test]
+    fn insert_at_panics_when_page_is_full() {
+        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let max_size = BTreeLeafPageMut::<u64, 8>::MAX_SIZE;
+        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
+
+        for idx in 0..max_size {
+            leaf.insert_at(idx, &(idx as u64), &Rid::new(1, idx));
+        }
+
+        assert_eq!(leaf.curr_size(), max_size);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            leaf.insert_at(max_size, &999, &Rid::new(1, 999));
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn insert_at_shifts_tombstone_indexes() {
         let mut data = [0; DEFAULT_PAGE_SIZE];
         let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
@@ -452,6 +537,61 @@ mod tests {
         assert_eq!(leaf.tombstones_mut()[0].0, 0);
         assert_eq!(leaf.tombstones_mut()[1].0, 2);
         assert_eq!(leaf.tombstones_mut()[2].0, 3);
+    }
+
+    #[test]
+    fn move_split_entries_to_moves_entries_and_shrinks_source() {
+        let mut source_data = [0; DEFAULT_PAGE_SIZE];
+        let mut recipient_data = [0; DEFAULT_PAGE_SIZE];
+        let mut source = BTreeLeafPageMut::<u64, 8>::init(&mut source_data);
+        let mut recipient = BTreeLeafPageMut::<u64, 8>::init(&mut recipient_data);
+
+        source.set_size(4);
+        source.write_entry(0, &10, &Rid::new(1, 10));
+        source.write_entry(1, &20, &Rid::new(1, 20));
+        source.write_entry(2, &30, &Rid::new(1, 30));
+        source.write_entry(3, &40, &Rid::new(1, 40));
+
+        source.move_split_entries_to(&mut recipient, 2);
+
+        assert_eq!(source.curr_size(), 2);
+        assert_eq!(recipient.curr_size(), 2);
+        assert_eq!(*source.key_ref(0), 10);
+        assert_eq!(*source.rid_ref(0), Rid::new(1, 10));
+        assert_eq!(*source.key_ref(1), 20);
+        assert_eq!(*source.rid_ref(1), Rid::new(1, 20));
+        assert_eq!(*recipient.key_ref(0), 30);
+        assert_eq!(*recipient.rid_ref(0), Rid::new(1, 30));
+        assert_eq!(*recipient.key_ref(1), 40);
+        assert_eq!(*recipient.rid_ref(1), Rid::new(1, 40));
+    }
+
+    #[test]
+    fn move_split_entries_to_preserves_left_tombstones_and_skips_moved_tombstones() {
+        let mut source_data = [0; DEFAULT_PAGE_SIZE];
+        let mut recipient_data = [0; DEFAULT_PAGE_SIZE];
+        let mut source = BTreeLeafPageMut::<u64, 8>::init(&mut source_data);
+        let mut recipient = BTreeLeafPageMut::<u64, 8>::init(&mut recipient_data);
+
+        source.set_size(5);
+        for idx in 0..5 {
+            let key = ((idx + 1) * 10) as u64;
+            source.write_entry(idx, &key, &Rid::new(1, key as usize));
+        }
+        source.set_num_tombstones(2);
+        source.tombstones_mut()[..2].copy_from_slice(&[TombstoneIndex(1), TombstoneIndex(3)]);
+
+        source.move_split_entries_to(&mut recipient, 2);
+
+        assert_eq!(source.curr_size(), 2);
+        assert_eq!(source.num_tombstones(), 1);
+        assert_eq!(source.tombstones()[0].0, 1);
+        assert_eq!(recipient.curr_size(), 2);
+        assert_eq!(recipient.num_tombstones(), 0);
+        assert_eq!(*recipient.key_ref(0), 30);
+        assert_eq!(*recipient.rid_ref(0), Rid::new(1, 30));
+        assert_eq!(*recipient.key_ref(1), 50);
+        assert_eq!(*recipient.rid_ref(1), Rid::new(1, 50));
     }
 
     #[test]
