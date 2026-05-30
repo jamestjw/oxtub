@@ -204,9 +204,9 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         self.header_mut().next_page_id = page_id as u32;
     }
 
-    pub fn find_pos<C>(&self, key: &K, c: &C) -> usize
+    fn lower_bound_by<F>(&self, compare_entry: F) -> usize
     where
-        C: KeyComparator<K>,
+        F: Fn(usize) -> std::cmp::Ordering,
     {
         let mut left = 0;
         let mut right = self.header().common.current_size as usize;
@@ -214,7 +214,7 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         while left < right {
             let mid = left + ((right - left) / 2);
 
-            match c.compare(self.key_ref(mid), key) {
+            match compare_entry(mid) {
                 std::cmp::Ordering::Less => {
                     left = mid + 1;
                 }
@@ -227,31 +227,21 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         left
     }
 
+    pub fn find_pos<C>(&self, key: &K, c: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        self.lower_bound_by(|idx| c.compare(self.key_ref(idx), key))
+    }
+
     pub fn find_insert_pos<C>(&self, key: &K, rid: &Rid, c: &C) -> usize
     where
         C: KeyComparator<K>,
     {
-        let mut left = 0;
-        let mut right = self.header().common.current_size as usize;
-
-        while left < right {
-            let mid = left + ((right - left) / 2);
-
-            let ord = c
-                .compare(self.key_ref(mid), key)
-                .then_with(|| compare_rid(self.rid_ref(mid), rid));
-
-            match ord {
-                std::cmp::Ordering::Less => {
-                    left = mid + 1;
-                }
-                _ => {
-                    right = mid;
-                }
-            }
-        }
-
-        left
+        self.lower_bound_by(|idx| {
+            c.compare(self.key_ref(idx), key)
+                .then_with(|| compare_rid(self.rid_ref(idx), rid))
+        })
     }
 }
 
@@ -359,14 +349,16 @@ mod tests {
     fn find_pos_returns_first_matching_logical_key() {
         let mut data = [0; DEFAULT_PAGE_SIZE];
         let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
-        leaf.header_mut().common.current_size = 4;
+        leaf.header_mut().common.current_size = 5;
         write_entry(&mut leaf, 0, 10, Rid::new(1, 1));
         write_entry(&mut leaf, 1, 20, Rid::new(1, 1));
         write_entry(&mut leaf, 2, 20, Rid::new(1, 2));
         write_entry(&mut leaf, 3, 30, Rid::new(1, 1));
+        write_entry(&mut leaf, 4, 40, Rid::new(1, 1));
 
         assert_eq!(leaf.find_pos(&20, &U64Comparator), 1);
         assert_eq!(leaf.find_pos(&25, &U64Comparator), 3);
+        assert_eq!(leaf.find_pos(&30, &U64Comparator), 3);
     }
 
     #[test]
