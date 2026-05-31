@@ -163,7 +163,7 @@ impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
     }
 
     pub fn value_idx(&self, value: &PageId) -> Option<usize> {
-        self.values()
+        self.values()[..self.curr_size()]
             .iter()
             .enumerate()
             .find_map(|(idx, v)| if *v == *value { Some(idx) } else { None })
@@ -208,17 +208,21 @@ impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
 
     pub fn insert_after(&mut self, after: &PageId, key: K, rid: Rid, val: PageId) {
         let after_idx = self.value_idx(after).expect("existing child ptr not found");
+        let size = self.curr_size();
+        let insert_idx = after_idx + 1;
 
-        for i in ((after_idx + 1)..self.curr_size()).rev() {
-            let key = *self.key_at(i - 1);
-            let rid = *self.rid_at(i - 1);
-            let val = *self.value_at(i - 1);
-            self.set_value_at(i, val);
-            self.set_index_key_at(i, &key, &rid);
+        assert!(size < self.max_size());
+
+        for i in (insert_idx..size).rev() {
+            let key = *self.key_at(i);
+            let rid = *self.rid_at(i);
+            let val = *self.value_at(i);
+            self.set_index_key_at(i + 1, &key, &rid);
+            self.set_value_at(i + 1, val);
         }
 
-        self.set_index_key_at(after_idx + 1, &key, &rid);
-        self.set_value_at(after_idx + 1, val);
+        self.set_index_key_at(insert_idx, &key, &rid);
+        self.set_value_at(insert_idx, val);
         self.header_mut().current_size += 1;
     }
 
@@ -229,6 +233,8 @@ impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
+
+    use expect_test::expect;
 
     use super::*;
 
@@ -242,6 +248,36 @@ mod tests {
 
     fn set_size(page: &mut BTreeInternalPageMut<'_, u64>, size: usize) {
         page.header_mut().current_size = size as u16;
+    }
+
+    fn draw_internal_page(page: &BTreeInternalPageMut<'_, u64>) -> String {
+        let mut out = String::new();
+
+        out.push_str(&format!(
+            "size={}, max_size={}\n",
+            page.curr_size(),
+            page.max_size()
+        ));
+
+        for idx in 0..page.curr_size() {
+            if idx == 0 {
+                out.push_str(&format!(
+                    "slot {idx}: key=<invalid>, value={}\n",
+                    page.value_at(idx)
+                ));
+            } else {
+                let rid = page.rid_at(idx);
+                out.push_str(&format!(
+                    "slot {idx}: key=({}, rid={}:{}), value={}\n",
+                    page.key_at(idx),
+                    rid.page_id,
+                    rid.slot_id,
+                    page.value_at(idx)
+                ));
+            }
+        }
+
+        out
     }
 
     #[test]
@@ -322,5 +358,91 @@ mod tests {
         assert_eq!(page.find_child_idx(&21, &comparator), 4);
         assert_eq!(page.find_child_idx(&30, &comparator), 4);
         assert_eq!(page.find_child_idx(&31, &comparator), 5);
+    }
+
+    #[test]
+    fn insert_after_shifts_entries_when_inserting_after_first_middle_and_last_child() {
+        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+
+        set_size(&mut page, 3);
+        page.set_value_at(0, 100);
+        page.set_index_key_at(1, &20, &Rid::new(2, 1));
+        page.set_value_at(1, 102);
+        page.set_index_key_at(2, &30, &Rid::new(3, 1));
+        page.set_value_at(2, 103);
+
+        expect![[r#"
+size=3, max_size=409
+slot 0: key=<invalid>, value=100
+slot 1: key=(20, rid=2:1), value=102
+slot 2: key=(30, rid=3:1), value=103
+"#]]
+        .assert_eq(&draw_internal_page(&page));
+
+        page.insert_after(&100, 10, Rid::new(1, 1), 101);
+
+        expect![[r#"
+size=4, max_size=409
+slot 0: key=<invalid>, value=100
+slot 1: key=(10, rid=1:1), value=101
+slot 2: key=(20, rid=2:1), value=102
+slot 3: key=(30, rid=3:1), value=103
+"#]]
+        .assert_eq(&draw_internal_page(&page));
+
+        page.insert_after(&101, 15, Rid::new(1, 5), 150);
+
+        expect![[r#"
+size=5, max_size=409
+slot 0: key=<invalid>, value=100
+slot 1: key=(10, rid=1:1), value=101
+slot 2: key=(15, rid=1:5), value=150
+slot 3: key=(20, rid=2:1), value=102
+slot 4: key=(30, rid=3:1), value=103
+"#]]
+        .assert_eq(&draw_internal_page(&page));
+
+        page.insert_after(&103, 40, Rid::new(4, 1), 104);
+
+        expect![[r#"
+size=6, max_size=409
+slot 0: key=<invalid>, value=100
+slot 1: key=(10, rid=1:1), value=101
+slot 2: key=(15, rid=1:5), value=150
+slot 3: key=(20, rid=2:1), value=102
+slot 4: key=(30, rid=3:1), value=103
+slot 5: key=(40, rid=4:1), value=104
+"#]]
+        .assert_eq(&draw_internal_page(&page));
+    }
+
+    #[test]
+    #[should_panic(expected = "existing child ptr not found")]
+    fn insert_after_panics_when_child_pointer_is_missing() {
+        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+
+        set_size(&mut page, 1);
+        page.set_value_at(0, 100);
+
+        page.insert_after(&999, 10, Rid::new(1, 1), 101);
+    }
+
+    #[test]
+    #[should_panic]
+    fn insert_after_panics_when_page_is_full() {
+        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+
+        let max_size = page.max_size();
+        set_size(&mut page, max_size);
+        page.set_value_at(0, 100);
+        for idx in 1..max_size {
+            page.set_index_key_at(idx, &(idx as u64 * 10), &Rid::new(idx, 1));
+            page.set_value_at(idx, 100 + idx as PageId);
+        }
+
+        page.insert_after(&100, 5, Rid::new(0, 1), 101);
     }
 }

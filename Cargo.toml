@@ -10,4 +10,5 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 
 [dev-dependencies]
+expect-test = "1"
 tempfile = "3.27.0"
