@@ -1,7 +1,6 @@
 use std::marker::PhantomData;
 
 use crate::{
-    buffer::page::PageBytes,
     common::{
         alignment::{align_up, max_usize},
         types::PageId,
@@ -35,19 +34,19 @@ use crate::{
 // | PAGE_ID(0)      | PAGE_ID(1) | PAGE_ID(2) | ... | PAGE_ID(n - 1) |
 //  ------------------------------------------------------------------
 
-pub struct BTreeInternalPage<'a, K> {
-    data: &'a [u8],
+pub struct BTreeInternalPage<'a, K, const PAGE_SIZE: usize = DEFAULT_PAGE_SIZE> {
+    data: &'a [u8; PAGE_SIZE],
     _marker: PhantomData<K>,
 }
 
-pub struct BTreeInternalPageMut<'a, K> {
-    data: &'a mut [u8],
+pub struct BTreeInternalPageMut<'a, K, const PAGE_SIZE: usize = DEFAULT_PAGE_SIZE> {
+    data: &'a mut [u8; PAGE_SIZE],
     _marker: PhantomData<K>,
 }
 
 type BTreeInternalHeader = BTreePageHeader;
 
-impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
+impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, PAGE_SIZE> {
     const NUM_SLOTS: usize = Self::max_slots();
 
     const INDEX_KEY_ALIGN: usize = max_usize(align_of::<K>(), align_of::<Rid>());
@@ -71,7 +70,7 @@ impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
     const fn max_slots() -> usize {
         let mut slots = 0;
 
-        while Self::values_end_for_slots(slots + 1) <= DEFAULT_PAGE_SIZE {
+        while Self::values_end_for_slots(slots + 1) <= PAGE_SIZE {
             slots += 1;
         }
 
@@ -88,14 +87,14 @@ impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
         bytemuck::from_bytes_mut(header_bytes)
     }
 
-    pub fn from_data(data: &'a mut PageBytes) -> Self {
+    pub fn from_data(data: &'a mut [u8; PAGE_SIZE]) -> Self {
         Self {
             data,
             _marker: PhantomData,
         }
     }
 
-    pub fn init(data: &'a mut PageBytes) -> Self {
+    pub fn init(data: &'a mut [u8; PAGE_SIZE]) -> Self {
         data.fill(0);
 
         let mut page = Self::from_data(data);
@@ -211,6 +210,8 @@ impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
         let size = self.curr_size();
         let insert_idx = after_idx + 1;
 
+        assert!(size < self.max_size());
+
         for i in (insert_idx..size).rev() {
             let key = *self.key_at(i);
             let rid = *self.rid_at(i);
@@ -239,6 +240,38 @@ impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
         self.header_mut().current_size -= 1;
     }
 
+    pub fn split_to(&mut self, recipient: &mut Self) -> (K, Rid) {
+        let size = self.curr_size();
+        let split_idx = self.min_size();
+        assert!(size > split_idx);
+        assert_eq!(recipient.curr_size(), 0);
+
+        let promoted_key = *self.key_at(split_idx);
+        let promoted_rid = *self.rid_at(split_idx);
+
+        recipient.set_value_at(0, *self.value_at(split_idx));
+
+        let mut recipient_size = 1;
+
+        for i in (split_idx + 1)..size {
+            let key = *self.key_at(i);
+            let rid = *self.rid_at(i);
+            let val = *self.value_at(i);
+            recipient.set_index_key_at(recipient_size, &key, &rid);
+            recipient.set_value_at(recipient_size, val);
+            recipient_size += 1;
+        }
+
+        recipient.header_mut().set_size(recipient_size);
+        self.header_mut().set_size(split_idx);
+
+        (promoted_key, promoted_rid)
+    }
+
+    pub fn min_size(&self) -> usize {
+        (self.max_size() + 1) / 2
+    }
+
     // void RemoveAt(int index);
     // auto SplitTo(BPlusTreeInternalPage *recipient) -> KeyType;
 }
@@ -259,11 +292,16 @@ mod tests {
         }
     }
 
-    fn set_size(page: &mut BTreeInternalPageMut<'_, u64>, size: usize) {
+    fn set_size<const PAGE_SIZE: usize>(
+        page: &mut BTreeInternalPageMut<'_, u64, PAGE_SIZE>,
+        size: usize,
+    ) {
         page.header_mut().current_size = size as u16;
     }
 
-    fn draw_internal_page(page: &BTreeInternalPageMut<'_, u64>) -> String {
+    fn draw_internal_page<const PAGE_SIZE: usize>(
+        page: &BTreeInternalPageMut<'_, u64, PAGE_SIZE>,
+    ) -> String {
         let mut out = String::new();
 
         out.push_str(&format!(
@@ -457,6 +495,56 @@ slot 5: key=(40, rid=4:1), value=104
         }
 
         page.insert_after(&100, 5, Rid::new(0, 1), 101);
+    }
+
+    #[test]
+    fn split_to_promotes_middle_key_and_moves_right_half_to_recipient() {
+        let mut source_data = [0; 128];
+        let mut recipient_data = [0; 128];
+        let mut source = BTreeInternalPageMut::<u64, 128>::init(&mut source_data);
+        let mut recipient = BTreeInternalPageMut::<u64, 128>::init(&mut recipient_data);
+
+        let max_size = source.max_size();
+        assert_eq!(max_size, 6);
+
+        set_size(&mut source, max_size);
+        source.set_value_at(0, 100);
+        for idx in 1..max_size {
+            source.set_index_key_at(idx, &(idx as u64 * 10), &Rid::new(idx, 1));
+            source.set_value_at(idx, 100 + idx as PageId);
+        }
+
+        expect![[r#"
+size=6, max_size=6
+slot 0: key=<invalid>, value=100
+slot 1: key=(10, rid=1:1), value=101
+slot 2: key=(20, rid=2:1), value=102
+slot 3: key=(30, rid=3:1), value=103
+slot 4: key=(40, rid=4:1), value=104
+slot 5: key=(50, rid=5:1), value=105
+"#]]
+        .assert_eq(&draw_internal_page(&source));
+
+        let (promoted_key, promoted_rid) = source.split_to(&mut recipient);
+
+        assert_eq!(promoted_key, 30);
+        assert_eq!(promoted_rid, Rid::new(3, 1));
+
+        expect![[r#"
+size=3, max_size=6
+slot 0: key=<invalid>, value=100
+slot 1: key=(10, rid=1:1), value=101
+slot 2: key=(20, rid=2:1), value=102
+"#]]
+        .assert_eq(&draw_internal_page(&source));
+
+        expect![[r#"
+size=3, max_size=6
+slot 0: key=<invalid>, value=103
+slot 1: key=(40, rid=4:1), value=104
+slot 2: key=(50, rid=5:1), value=105
+"#]]
+        .assert_eq(&draw_internal_page(&recipient));
     }
 
     #[test]

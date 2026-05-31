@@ -27,4 +27,8 @@ impl BTreePageHeader {
     pub fn is_leaf(&self) -> bool {
         self.page_type == PAGE_TYPE_LEAF
     }
+
+    pub fn set_size(&mut self, size: usize) {
+        self.current_size = size as u16;
+    }
 }
