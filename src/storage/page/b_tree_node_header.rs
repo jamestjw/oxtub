@@ -4,7 +4,7 @@ pub const PAGE_TYPE_INTERNAL: u8 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct BTreePageHeader {
+pub struct BTreeNodeHeader {
     // 8 byte header, we do explicit padding for clarity
     page_type: u8,
     _padding: u8,
@@ -13,7 +13,7 @@ pub struct BTreePageHeader {
     _reserved: u16,
 }
 
-impl BTreePageHeader {
+impl BTreeNodeHeader {
     pub fn init(&mut self, page_type: u8, max_size: usize) {
         assert!(max_size <= u16::MAX as usize);
 

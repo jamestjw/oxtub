@@ -8,7 +8,7 @@ use crate::{
     storage::{
         disk::config::DEFAULT_PAGE_SIZE,
         index::comparator::KeyComparator,
-        page::b_tree_page_header::{BTreePageHeader, PAGE_TYPE_INTERNAL},
+        page::b_tree_node_header::{BTreeNodeHeader, PAGE_TYPE_INTERNAL},
         rid::Rid,
     },
 };
@@ -44,7 +44,7 @@ pub struct BTreeInternalPageMut<'a, K, const PAGE_SIZE: usize = DEFAULT_PAGE_SIZ
     _marker: PhantomData<K>,
 }
 
-type BTreeInternalHeader = BTreePageHeader;
+type BTreeInternalHeader = BTreeNodeHeader;
 
 impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, PAGE_SIZE> {
     const NUM_SLOTS: usize = Self::max_slots();
@@ -77,7 +77,7 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
         slots
     }
 
-    fn header(&self) -> &BTreePageHeader {
+    fn header(&self) -> &BTreeNodeHeader {
         let header_bytes = &self.data[..size_of::<BTreeInternalHeader>()];
         bytemuck::from_bytes(header_bytes)
     }

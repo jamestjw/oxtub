@@ -8,7 +8,7 @@ use crate::{
     storage::{
         disk::config::DEFAULT_PAGE_SIZE,
         index::comparator::KeyComparator,
-        page::b_tree_page_header::{BTreePageHeader, PAGE_TYPE_LEAF},
+        page::b_tree_node_header::{BTreeNodeHeader, PAGE_TYPE_LEAF},
         rid::Rid,
     },
 };
@@ -42,7 +42,7 @@ impl TombstoneIndex {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BTreeLeafHeader {
-    common: BTreePageHeader,
+    common: BTreeNodeHeader,
     next_page_id: u32,
     num_tombstones: u16,
     _reserved: u16,
