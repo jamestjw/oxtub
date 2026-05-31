@@ -1,3 +1,5 @@
+use crate::buffer::page::PageBytes;
+
 pub const PAGE_TYPE_INVALID: u8 = 0;
 pub const PAGE_TYPE_LEAF: u8 = 1;
 pub const PAGE_TYPE_INTERNAL: u8 = 2;
@@ -22,6 +24,10 @@ impl BTreeNodeHeader {
         self.current_size = 0;
         self.max_size = max_size as u16;
         self._reserved = 0;
+    }
+
+    pub fn from_data(data: &PageBytes) -> &Self {
+        bytemuck::from_bytes(&data[..size_of::<Self>()])
     }
 
     pub fn is_leaf(&self) -> bool {
