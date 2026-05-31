@@ -34,9 +34,13 @@ use crate::{
 // | PAGE_ID(0)      | PAGE_ID(1) | PAGE_ID(2) | ... | PAGE_ID(n - 1) |
 //  ------------------------------------------------------------------
 
-pub struct BTreeInternalPage<'a, K, const PAGE_SIZE: usize = DEFAULT_PAGE_SIZE> {
+struct BTreeInternalPageView<'a, K, const PAGE_SIZE: usize> {
     data: &'a [u8; PAGE_SIZE],
     _marker: PhantomData<K>,
+}
+
+pub struct BTreeInternalPage<'a, K, const PAGE_SIZE: usize = DEFAULT_PAGE_SIZE> {
+    view: BTreeInternalPageView<'a, K, PAGE_SIZE>,
 }
 
 pub struct BTreeInternalPageMut<'a, K, const PAGE_SIZE: usize = DEFAULT_PAGE_SIZE> {
@@ -46,7 +50,7 @@ pub struct BTreeInternalPageMut<'a, K, const PAGE_SIZE: usize = DEFAULT_PAGE_SIZ
 
 type BTreeInternalHeader = BTreeNodeHeader;
 
-impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, PAGE_SIZE> {
+impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageView<'a, K, PAGE_SIZE> {
     const NUM_SLOTS: usize = Self::max_slots();
 
     const INDEX_KEY_ALIGN: usize = max_usize(align_of::<K>(), align_of::<Rid>());
@@ -77,33 +81,19 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
         slots
     }
 
-    fn header(&self) -> &BTreeNodeHeader {
-        let header_bytes = &self.data[..size_of::<BTreeInternalHeader>()];
-        bytemuck::from_bytes(header_bytes)
-    }
-
-    fn header_mut(&mut self) -> &mut BTreeInternalHeader {
-        let header_bytes = &mut self.data[..size_of::<BTreeInternalHeader>()];
-        bytemuck::from_bytes_mut(header_bytes)
-    }
-
-    pub fn from_data(data: &'a mut [u8; PAGE_SIZE]) -> Self {
+    fn from_data(data: &'a [u8; PAGE_SIZE]) -> Self {
         Self {
             data,
             _marker: PhantomData,
         }
     }
 
-    pub fn init(data: &'a mut [u8; PAGE_SIZE]) -> Self {
-        data.fill(0);
-
-        let mut page = Self::from_data(data);
-        page.header_mut().init(PAGE_TYPE_INTERNAL, Self::NUM_SLOTS);
-
-        page
+    fn header(&self) -> &BTreeNodeHeader {
+        let header_bytes = &self.data[..size_of::<BTreeInternalHeader>()];
+        bytemuck::from_bytes(header_bytes)
     }
 
-    pub fn max_size(&self) -> usize {
+    fn max_size(&self) -> usize {
         self.header().max_size as usize
     }
 
@@ -131,52 +121,28 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
         bytemuck::cast_slice(&self.data[Self::VALUES_OFFSET..Self::VALUES_END])
     }
 
-    fn values_mut(&mut self) -> &mut [PageId] {
-        bytemuck::cast_slice_mut(&mut self.data[Self::VALUES_OFFSET..Self::VALUES_END])
-    }
-
-    pub fn key_at(&self, idx: usize) -> &K {
+    fn key_at(&self, idx: usize) -> &K {
         assert!(idx < self.curr_size());
         self.key_ref(idx)
     }
 
-    pub fn rid_at(&self, idx: usize) -> &Rid {
+    fn rid_at(&self, idx: usize) -> &Rid {
         assert!(idx < self.curr_size());
         self.rid_ref(idx)
     }
 
-    pub fn set_index_key_at(&mut self, idx: usize, key: &K, rid: &Rid) {
-        self.write_index_key(idx, key, rid);
-    }
-
-    fn write_index_key(&mut self, idx: usize, key: &K, rid: &Rid) {
-        assert!(idx < self.max_size(), "out of bounds");
-
-        let key_start = Self::index_key_offset(idx);
-        let key_end = key_start + size_of::<K>();
-        self.data[key_start..key_end].copy_from_slice(bytemuck::bytes_of(key));
-
-        let rid_start = key_start + Self::INDEX_KEY_RID_OFFSET;
-        let rid_end = rid_start + size_of::<Rid>();
-        self.data[rid_start..rid_end].copy_from_slice(bytemuck::bytes_of(rid));
-    }
-
-    pub fn value_idx(&self, value: &PageId) -> Option<usize> {
+    fn value_idx(&self, value: &PageId) -> Option<usize> {
         self.values()[..self.curr_size()]
             .iter()
             .enumerate()
             .find_map(|(idx, v)| if *v == *value { Some(idx) } else { None })
     }
 
-    pub fn value_at(&self, idx: usize) -> &PageId {
+    fn value_at(&self, idx: usize) -> &PageId {
         &self.values()[idx]
     }
 
-    pub fn set_value_at(&mut self, idx: usize, value: PageId) {
-        self.values_mut()[idx] = value;
-    }
-
-    pub fn find_child_idx<C>(&self, key: &K, c: &C) -> usize
+    fn find_child_idx<C>(&self, key: &K, c: &C) -> usize
     where
         C: KeyComparator<K>,
     {
@@ -203,6 +169,154 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
         // since the separators also include the RID, the page on the
         // immediate left could also contain keys with K
         right - 1
+    }
+}
+
+impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPage<'a, K, PAGE_SIZE> {
+    pub fn from_data(data: &'a [u8; PAGE_SIZE]) -> Self {
+        Self {
+            view: BTreeInternalPageView::from_data(data),
+        }
+    }
+
+    pub fn max_size(&self) -> usize {
+        self.view.max_size()
+    }
+
+    pub fn key_at(&self, idx: usize) -> &K {
+        self.view.key_at(idx)
+    }
+
+    pub fn rid_at(&self, idx: usize) -> &Rid {
+        self.view.rid_at(idx)
+    }
+
+    pub fn value_at(&self, idx: usize) -> &PageId {
+        self.view.value_at(idx)
+    }
+
+    pub fn find_child_idx<C>(&self, key: &K, c: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        self.view.find_child_idx(key, c)
+    }
+}
+
+impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, PAGE_SIZE> {
+    pub fn from_data(data: &'a mut [u8; PAGE_SIZE]) -> Self {
+        Self {
+            data,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn init(data: &'a mut [u8; PAGE_SIZE]) -> Self {
+        data.fill(0);
+
+        let mut page = Self::from_data(data);
+        page.header_mut().init(
+            PAGE_TYPE_INTERNAL,
+            BTreeInternalPageView::<K, PAGE_SIZE>::NUM_SLOTS,
+        );
+
+        page
+    }
+
+    fn view(&self) -> BTreeInternalPageView<'_, K, PAGE_SIZE> {
+        BTreeInternalPageView::from_data(self.data)
+    }
+
+    fn header_mut(&mut self) -> &mut BTreeInternalHeader {
+        let header_bytes = &mut self.data[..size_of::<BTreeInternalHeader>()];
+        bytemuck::from_bytes_mut(header_bytes)
+    }
+
+    pub fn max_size(&self) -> usize {
+        self.header().max_size as usize
+    }
+
+    fn curr_size(&self) -> usize {
+        self.header().current_size as usize
+    }
+
+    fn index_key_offset(idx: usize) -> usize {
+        BTreeInternalPageView::<K, PAGE_SIZE>::index_key_offset(idx)
+    }
+
+    fn header(&self) -> &BTreeNodeHeader {
+        let header_bytes = &self.data[..size_of::<BTreeInternalHeader>()];
+        bytemuck::from_bytes(header_bytes)
+    }
+
+    fn key_ref(&self, idx: usize) -> &K {
+        let start = Self::index_key_offset(idx);
+        let end = start + size_of::<K>();
+        bytemuck::from_bytes(&self.data[start..end])
+    }
+
+    fn rid_ref(&self, idx: usize) -> &Rid {
+        let start = Self::index_key_offset(idx)
+            + BTreeInternalPageView::<K, PAGE_SIZE>::INDEX_KEY_RID_OFFSET;
+        let end = start + size_of::<Rid>();
+        bytemuck::from_bytes(&self.data[start..end])
+    }
+
+    fn values(&self) -> &[PageId] {
+        let values_offset = BTreeInternalPageView::<K, PAGE_SIZE>::VALUES_OFFSET;
+        let values_end = BTreeInternalPageView::<K, PAGE_SIZE>::VALUES_END;
+        bytemuck::cast_slice(&self.data[values_offset..values_end])
+    }
+
+    pub fn key_at(&self, idx: usize) -> &K {
+        assert!(idx < self.curr_size());
+        self.key_ref(idx)
+    }
+
+    pub fn rid_at(&self, idx: usize) -> &Rid {
+        assert!(idx < self.curr_size());
+        self.rid_ref(idx)
+    }
+
+    fn values_mut(&mut self) -> &mut [PageId] {
+        let values_offset = BTreeInternalPageView::<K, PAGE_SIZE>::VALUES_OFFSET;
+        let values_end = BTreeInternalPageView::<K, PAGE_SIZE>::VALUES_END;
+        bytemuck::cast_slice_mut(&mut self.data[values_offset..values_end])
+    }
+
+    pub fn set_index_key_at(&mut self, idx: usize, key: &K, rid: &Rid) {
+        self.write_index_key(idx, key, rid);
+    }
+
+    fn write_index_key(&mut self, idx: usize, key: &K, rid: &Rid) {
+        assert!(idx < self.max_size(), "out of bounds");
+
+        let key_start = Self::index_key_offset(idx);
+        let key_end = key_start + size_of::<K>();
+        self.data[key_start..key_end].copy_from_slice(bytemuck::bytes_of(key));
+
+        let rid_start = key_start + BTreeInternalPageView::<K, PAGE_SIZE>::INDEX_KEY_RID_OFFSET;
+        let rid_end = rid_start + size_of::<Rid>();
+        self.data[rid_start..rid_end].copy_from_slice(bytemuck::bytes_of(rid));
+    }
+
+    pub fn value_idx(&self, value: &PageId) -> Option<usize> {
+        self.view().value_idx(value)
+    }
+
+    pub fn value_at(&self, idx: usize) -> &PageId {
+        &self.values()[idx]
+    }
+
+    pub fn set_value_at(&mut self, idx: usize, value: PageId) {
+        self.values_mut()[idx] = value;
+    }
+
+    pub fn find_child_idx<C>(&self, key: &K, c: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        self.view().find_child_idx(key, c)
     }
 
     pub fn insert_after(&mut self, after: &PageId, key: K, rid: Rid, val: PageId) {
@@ -387,6 +501,34 @@ mod tests {
         assert_eq!(page.find_child_idx(&29, &comparator), 2);
         assert_eq!(page.find_child_idx(&31, &comparator), 3);
         assert_eq!(page.find_child_idx(&u64::MAX, &comparator), 3);
+    }
+
+    #[test]
+    fn immutable_internal_page_reads_entries_written_by_mutable_page() {
+        let mut data = crate::buffer::page::PageData([0; DEFAULT_PAGE_SIZE]);
+        let comparator = U64Comparator;
+
+        {
+            let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
+            set_size(&mut page, 4);
+            page.set_value_at(0, 100);
+            page.set_index_key_at(1, &10, &Rid::new(1, 1));
+            page.set_value_at(1, 101);
+            page.set_index_key_at(2, &20, &Rid::new(2, 1));
+            page.set_value_at(2, 102);
+            page.set_index_key_at(3, &30, &Rid::new(3, 1));
+            page.set_value_at(3, 103);
+        }
+
+        let page = BTreeInternalPage::<u64>::from_data(&data.0);
+
+        assert_eq!(page.max_size(), 409);
+        assert_eq!(*page.key_at(1), 10);
+        assert_eq!(*page.rid_at(1), Rid::new(1, 1));
+        assert_eq!(*page.value_at(1), 101);
+        assert_eq!(page.find_child_idx(&9, &comparator), 0);
+        assert_eq!(page.find_child_idx(&20, &comparator), 1);
+        assert_eq!(page.find_child_idx(&31, &comparator), 3);
     }
 
     #[test]

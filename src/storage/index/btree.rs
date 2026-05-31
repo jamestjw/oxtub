@@ -106,7 +106,8 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>> BTree<'a, K, C> {
     }
 
     pub fn is_empty(&self) -> bool {
-        BTreeRootPage::from_data(self.header_guard().data()).root_page_id() == INVALID_PAGE_ID
+        let guard = self.header_guard();
+        BTreeRootPage::from_data(guard.data()).root_page_id() == INVALID_PAGE_ID
     }
 
     pub fn get_values(&self, key: &K) -> Vec<Rid> {
@@ -123,7 +124,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>> BTree<'a, K, C> {
         let mut current_guard = self.get_read_guard(current_page_id);
 
         while !BTreeNodeHeader::from_data(current_guard.data()).is_leaf() {
-            let internal_page = BTreeInternalPage::from_data(current_guard.data());
+            let internal_page = BTreeInternalPage::<K>::from_data(current_guard.data());
         }
 
         // auto current_guard = bpm_->ReadPage(current_page_id);
