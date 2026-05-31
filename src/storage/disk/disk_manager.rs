@@ -1,3 +1,4 @@
+use crate::common::types::PageId;
 use crate::storage::disk::config::DEFAULT_PAGE_SIZE;
 use crate::storage::disk::error::DiskManagerError;
 
@@ -12,8 +13,8 @@ pub struct DiskManager {
     db_file: PathBuf,
     db_file_handle: File,
     page_capacity: usize,
-    pages: HashMap<usize, usize>, // page_id -> file offset
-    free_slots: Vec<usize>,       // free file offsets (from deleted pages)
+    pages: HashMap<PageId, usize>, // page_id -> file offset
+    free_slots: Vec<usize>,        // free file offsets (from deleted pages)
 }
 
 impl DiskManager {
@@ -38,7 +39,7 @@ impl DiskManager {
     // Reading an unallocated page creates it and returns the zero-filled file contents.
     // TODO: see if this behaviour is really necessary, we can always add a new function
     // that just allocates a new page
-    pub fn read_page(&mut self, page_id: usize, data: &mut [u8]) -> Result<(), DiskManagerError> {
+    pub fn read_page(&mut self, page_id: PageId, data: &mut [u8]) -> Result<(), DiskManagerError> {
         if data.len() != DEFAULT_PAGE_SIZE {
             return Err(DiskManagerError::InvalidPageSize);
         }
@@ -57,7 +58,7 @@ impl DiskManager {
         Ok(())
     }
 
-    pub fn write_page(&mut self, page_id: usize, data: &[u8]) -> Result<(), DiskManagerError> {
+    pub fn write_page(&mut self, page_id: PageId, data: &[u8]) -> Result<(), DiskManagerError> {
         if data.len() != DEFAULT_PAGE_SIZE {
             return Err(DiskManagerError::InvalidPageSize);
         }
@@ -96,7 +97,7 @@ impl DiskManager {
         Ok(self.pages.len() * DEFAULT_PAGE_SIZE)
     }
 
-    pub fn delete_page(&mut self, page_id: usize) -> Result<(), DiskManagerError> {
+    pub fn delete_page(&mut self, page_id: PageId) -> Result<(), DiskManagerError> {
         match self.pages.remove(&page_id) {
             None => Err(DiskManagerError::PageNotFound(page_id)),
             Some(offset) => {

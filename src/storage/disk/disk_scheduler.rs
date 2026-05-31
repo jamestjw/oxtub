@@ -5,6 +5,7 @@ use std::{
 
 use crate::{
     buffer::page::PageBytes,
+    common::types::PageId,
     storage::disk::{
         config::DEFAULT_PAGE_SIZE, disk_manager::DiskManager, error::DiskSchedulerError,
     },
@@ -35,16 +36,16 @@ impl PageBuffer {
 
 enum DiskRequest {
     Read {
-        page_id: usize,
+        page_id: PageId,
         response: Sender<Result<PageBuffer, DiskSchedulerError>>,
     },
     Write {
-        page_id: usize,
+        page_id: PageId,
         data: PageBuffer,
         response: Sender<Result<(), DiskSchedulerError>>,
     },
     Delete {
-        page_id: usize,
+        page_id: PageId,
     },
 }
 
@@ -97,7 +98,7 @@ impl DiskScheduler {
         }
     }
 
-    pub fn read_page(&self, page_id: usize) -> Result<PageBuffer, DiskSchedulerError> {
+    pub fn read_page(&self, page_id: PageId) -> Result<PageBuffer, DiskSchedulerError> {
         match &self.sender {
             None => Err(DiskSchedulerError::WorkerStopped),
             Some(sender) => {
@@ -117,7 +118,7 @@ impl DiskScheduler {
         }
     }
 
-    pub fn write_page(&self, page_id: usize, data: PageBuffer) -> Result<(), DiskSchedulerError> {
+    pub fn write_page(&self, page_id: PageId, data: PageBuffer) -> Result<(), DiskSchedulerError> {
         match &self.sender {
             None => Err(DiskSchedulerError::WorkerStopped),
             Some(sender) => {
@@ -138,7 +139,7 @@ impl DiskScheduler {
         }
     }
 
-    pub fn delete_page(&self, page_id: usize) -> Result<(), DiskSchedulerError> {
+    pub fn delete_page(&self, page_id: PageId) -> Result<(), DiskSchedulerError> {
         match &self.sender {
             None => Err(DiskSchedulerError::WorkerStopped),
             Some(sender) => sender

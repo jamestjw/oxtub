@@ -1,17 +1,20 @@
 use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 
-use crate::buffer::{bpm::BufferPoolInner, page::Page};
+use crate::{
+    buffer::{bpm::BufferPoolInner, page::Page},
+    common::types::PageId,
+};
 
 pub struct ReadPageGuard<'a> {
     bpm: &'a BufferPoolInner,
-    page_id: usize,
+    page_id: PageId,
     frame_id: usize,
     guard: RwLockReadGuard<'a, Page>,
 }
 
 pub struct WritePageGuard<'a> {
     bpm: &'a BufferPoolInner,
-    page_id: usize,
+    page_id: PageId,
     frame_id: usize,
     guard: RwLockWriteGuard<'a, Page>,
 }
@@ -41,7 +44,7 @@ impl<'a> ReadPageGuard<'a> {
     pub(crate) fn new(
         bpm: &'a BufferPoolInner,
         frame_id: usize,
-        page_id: usize,
+        page_id: PageId,
         guard: RwLockReadGuard<'a, Page>,
     ) -> Self {
         Self {
@@ -52,7 +55,7 @@ impl<'a> ReadPageGuard<'a> {
         }
     }
 
-    pub fn page_id(&self) -> usize {
+    pub fn page_id(&self) -> PageId {
         self.page_id
     }
 }
@@ -61,7 +64,7 @@ impl<'a> WritePageGuard<'a> {
     pub(crate) fn new(
         bpm: &'a BufferPoolInner,
         frame_id: usize,
-        page_id: usize,
+        page_id: PageId,
         guard: RwLockWriteGuard<'a, Page>,
     ) -> Self {
         Self {
@@ -72,7 +75,7 @@ impl<'a> WritePageGuard<'a> {
         }
     }
 
-    pub fn page_id(&self) -> usize {
+    pub fn page_id(&self) -> PageId {
         self.page_id
     }
 }

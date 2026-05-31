@@ -490,7 +490,7 @@ slot 5: key=(40, rid=4:1), value=104
         set_size(&mut page, max_size);
         page.set_value_at(0, 100);
         for idx in 1..max_size {
-            page.set_index_key_at(idx, &(idx as u64 * 10), &Rid::new(idx, 1));
+            page.set_index_key_at(idx, &(idx as u64 * 10), &Rid::new(idx as u32, 1));
             page.set_value_at(idx, 100 + idx as PageId);
         }
 
@@ -510,8 +510,8 @@ slot 5: key=(40, rid=4:1), value=104
         set_size(&mut source, max_size);
         source.set_value_at(0, 100);
         for idx in 1..max_size {
-            source.set_index_key_at(idx, &(idx as u64 * 10), &Rid::new(idx, 1));
             source.set_value_at(idx, 100 + idx as PageId);
+            source.set_index_key_at(idx, &(idx as u64 * 10), &Rid::new(idx as PageId, 1));
         }
 
         expect![[r#"
@@ -555,7 +555,7 @@ slot 2: key=(50, rid=5:1), value=105
         set_size(&mut page, 6);
         page.set_value_at(0, 100);
         for idx in 1..6 {
-            page.set_index_key_at(idx, &(idx as u64 * 10), &Rid::new(idx, 1));
+            page.set_index_key_at(idx, &(idx as u64 * 10), &Rid::new(idx as u32, 1));
             page.set_value_at(idx, 100 + idx as PageId);
         }
 

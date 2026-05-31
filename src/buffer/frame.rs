@@ -1,5 +1,7 @@
 use std::sync::RwLock;
 
+use crate::common::types::PageId;
+
 use super::page::Page;
 
 pub(crate) struct Frame {
@@ -7,7 +9,7 @@ pub(crate) struct Frame {
 }
 
 pub(crate) struct FrameMeta {
-    pub(crate) page_id: Option<usize>,
+    pub(crate) page_id: Option<PageId>,
     pub(crate) pin_count: usize,
     pub(crate) is_dirty: bool,
 }

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::common::types::PageId;
+
 use super::replacer::Replacer;
 
 // LRUKReplacer implements the LRU-k replacement policy.
@@ -55,7 +57,7 @@ impl LruKReplacer {
 }
 
 impl Replacer for LruKReplacer {
-    fn record_access(&mut self, frame_id: usize, _page_id: usize) {
+    fn record_access(&mut self, frame_id: usize, _page_id: PageId) {
         if !(frame_id < self.replacer_size) {
             panic!("invalid frame id {frame_id}");
         }

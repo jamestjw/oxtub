@@ -10,6 +10,7 @@ use crate::{
         page_guard::{ReadPageGuard, WritePageGuard},
         replacer::{LruKReplacer, Replacer},
     },
+    common::types::PageId,
     storage::disk::{
         config::DEFAULT_PAGE_SIZE,
         disk_manager::DiskManager,
@@ -33,12 +34,12 @@ pub struct BufferPoolInner {
 
 pub(crate) struct BufferPoolState {
     // page_id -> frame_id
-    page_table: HashMap<usize, usize>,
+    page_table: HashMap<PageId, usize>,
     pub(crate) frame_metas: Vec<FrameMeta>,
     // frame_ids that are free
     free_list: Vec<usize>,
     pub(crate) replacer: Box<dyn Replacer>,
-    next_page_id: usize,
+    next_page_id: PageId,
 }
 
 impl BufferPoolManager {
@@ -76,14 +77,14 @@ impl BufferPoolManager {
         self.inner.frames.len()
     }
 
-    pub fn new_page(&self) -> usize {
+    pub fn new_page(&self) -> PageId {
         let mut state = self.inner.state.lock().unwrap();
         let page_id = state.next_page_id;
         state.next_page_id += 1;
         page_id
     }
 
-    pub fn pin_count(&self, page_id: usize) -> Option<usize> {
+    pub fn pin_count(&self, page_id: PageId) -> Option<usize> {
         let state = self.inner.state.lock().unwrap();
         state
             .page_table
@@ -94,7 +95,7 @@ impl BufferPoolManager {
     // If the page is pinned in the buffer pool, this function does nothing and
     // returns `false`. Otherwise, this function removes the page from both disk
     // and memory (if it is still in the buffer pool), returning `true`.
-    pub fn delete_page(&self, page_id: usize) -> Result<(), BufferPoolError> {
+    pub fn delete_page(&self, page_id: PageId) -> Result<(), BufferPoolError> {
         let mut state = self.inner.state.lock().unwrap();
 
         match state.page_table.get(&page_id).copied() {
@@ -146,7 +147,7 @@ impl BufferPoolManager {
      * - All frames are occupied, so we need to try to evict something using the replacement
      *   algorithm, then we load the page into the now free frame and return a guard for it.
      */
-    pub fn write_page(&self, page_id: usize) -> Result<WritePageGuard<'_>, BufferPoolError> {
+    pub fn write_page(&self, page_id: PageId) -> Result<WritePageGuard<'_>, BufferPoolError> {
         let mut state = self.inner.state.lock().unwrap();
 
         // Try to get a frame that we have already loaded the page into
@@ -189,7 +190,7 @@ impl BufferPoolManager {
         ))
     }
 
-    pub fn read_page(&self, page_id: usize) -> Result<ReadPageGuard<'_>, BufferPoolError> {
+    pub fn read_page(&self, page_id: PageId) -> Result<ReadPageGuard<'_>, BufferPoolError> {
         let mut state = self.inner.state.lock().unwrap();
 
         // Try to get a frame that we have already loaded the page into
@@ -227,7 +228,7 @@ impl BufferPoolManager {
         ))
     }
 
-    fn pin_loaded_page(state: &mut BufferPoolState, page_id: usize) -> Option<usize> {
+    fn pin_loaded_page(state: &mut BufferPoolState, page_id: PageId) -> Option<usize> {
         match state.page_table.get(&page_id).copied() {
             Some(frame_id) => {
                 state.frame_metas[frame_id].pin_count += 1;
@@ -240,7 +241,7 @@ impl BufferPoolManager {
         }
     }
 
-    fn publish_loaded_page(state: &mut BufferPoolState, page_id: usize, frame_id: usize) {
+    fn publish_loaded_page(state: &mut BufferPoolState, page_id: PageId, frame_id: usize) {
         state.page_table.insert(page_id, frame_id);
         state.frame_metas[frame_id].pin_count = 1;
         state.frame_metas[frame_id].is_dirty = false;

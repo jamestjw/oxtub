@@ -4,7 +4,10 @@ use bytemuck::Pod;
 
 use crate::{
     buffer::page::{INVALID_PAGE_ID, PageBytes},
-    common::alignment::{align_up, max_usize},
+    common::{
+        alignment::{align_up, max_usize},
+        types::PageId,
+    },
     storage::{
         disk::config::DEFAULT_PAGE_SIZE,
         index::comparator::KeyComparator,
@@ -77,8 +80,8 @@ impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
         self.header().num_tombstones as usize
     }
 
-    pub fn get_next_page_id(&self) -> usize {
-        self.header().next_page_id as usize
+    pub fn get_next_page_id(&self) -> PageId {
+        self.header().next_page_id
     }
 
     pub fn max_size(&self) -> usize {
@@ -224,10 +227,8 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
     //     self.header().next_page_id as usize
     // }
 
-    pub fn set_next_page_id(&mut self, page_id: usize) {
-        assert!(page_id <= u32::MAX as usize);
-
-        self.header_mut().next_page_id = page_id as u32;
+    pub fn set_next_page_id(&mut self, page_id: PageId) {
+        self.header_mut().next_page_id = page_id;
     }
 
     pub fn set_size(&mut self, size: usize) {
@@ -438,7 +439,7 @@ mod tests {
             leaf.header_mut().common.current_size = max_size as u16;
 
             for idx in 0..max_size {
-                leaf.write_entry(idx, &(idx as u32 + 100), &Rid::new(idx + 1, idx));
+                leaf.write_entry(idx, &(idx as u32 + 100), &Rid::new((idx + 1) as u32, idx));
             }
         }
 
@@ -446,7 +447,7 @@ mod tests {
 
         for idx in 0..max_size {
             assert_eq!(*leaf.key_at(idx), idx as u32 + 100);
-            assert_eq!(*leaf.value_at(idx), Rid::new(idx + 1, idx));
+            assert_eq!(*leaf.value_at(idx), Rid::new((idx + 1) as u32, idx));
         }
     }
 
