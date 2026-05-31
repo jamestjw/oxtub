@@ -70,6 +70,94 @@ A query like:
 cannot efficiently use an `(a, b)` index as a direct range scan, because `b` is
 not the leading key column.
 
+## Duplicate Index Entries
+
+The current implementation stores non-unique index entries as fixed-width
+physical entries ordered by `(K, Rid)`:
+
+```text
+(5, rid1)
+(5, rid2)
+(5, rid3)
+```
+
+This keeps duplicate handling deterministic. Leaf pages are sorted by `(K, Rid)`,
+and internal separator keys also include `Rid` so insertion can preserve the same
+total order.
+
+Logical lookups by `K` do not need a specific `Rid`. They route to the leftmost
+child that could contain `K`, then scan leaf entries to the right while the
+logical key matches.
+
+This layout is simple and correct, but duplicate-heavy indexes repeat the same
+key many times.
+
+## Future Duplicate Deduplication With Posting Lists
+
+A future optimization can store duplicate keys as posting-list cells:
+
+```text
+5 -> [rid1, rid2, rid3]
+6 -> [rid4]
+```
+
+For fixed-width `K`, a posting-list leaf page should likely use a slotted-page
+layout:
+
+```text
+header
+slot directory, sorted by K
+free space
+variable-size posting-list cells growing from the end
+```
+
+Each cell stores:
+
+```text
+K
+rid_count
+Rid[rid_count]
+```
+
+Posting-list cells should have a maximum physical size or maximum RID count. The
+point of this limit is not that two adjacent lists are logically better than one
+long list. The point is that every cell must remain small enough to fit on a page
+and be moved, split, and compacted normally.
+
+When a posting list reaches the limit, create another adjacent cell with the same
+logical key:
+
+```text
+5 -> [rid1..rid64]
+5 -> [rid65..rid128]
+```
+
+These cells are logically one duplicate group, but physically they are bounded
+chunks. Lookup for all duplicates scans adjacent cells while `K` matches.
+
+To preserve internal-page fanout, future posting-list internal pages may use
+`K`-only separators instead of `(K, Rid)` separators. This keeps internal keys
+smaller, at the cost of less precise insertion routing for duplicate-heavy keys.
+
+For insertion into a duplicate-heavy key, route to the leftmost leaf that could
+contain `K`, then scan right through leaf siblings until the target `(K, Rid)`
+belongs. The required page-range metadata does not need to be stored in the leaf
+header. It can be computed from the first and last posting-list cells:
+
+```text
+first_index_key = (first_cell.K, first_cell.first_rid)
+last_index_key  = (last_cell.K,  last_cell.last_rid)
+```
+
+This avoids duplicated metadata that can go stale. If duplicate insertion scans
+become too expensive, we can reconsider `(K, first_rid)` internal separators or a
+duplicate-specific structure.
+
+If a page has no room for a new or expanded posting-list cell, split the leaf by
+bytes used, not by number of cells. Overflow pages are more general, but should
+be avoided initially because they add complexity around deletion, scans, page
+lifecycle, and compaction.
+
 ## String Indexes
 
 String keys are variable-length and may depend on collation, so they should not
