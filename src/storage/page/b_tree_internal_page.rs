@@ -181,23 +181,29 @@ impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
     where
         C: KeyComparator<K>,
     {
+        // Invariant:
+        //      self.key_ref[left] < k <= self.key_ref[right]
         let size = self.curr_size();
         assert!(size > 0);
 
-        let mut left = 1;
+        let mut left = 0;
         let mut right = size;
 
-        while left < right {
+        while right - left > 1 {
             let mid = left + ((right - left) / 2);
+            debug_assert!(mid > 0);
 
             if c.compare(self.key_ref(mid), key).is_lt() {
-                left = mid + 1;
+                left = mid;
             } else {
                 right = mid;
             }
         }
 
-        left - 1
+        // right is the smallest value such that the invariant hold, but
+        // since the separators also include the RID, the page on the
+        // immediate left could also contain keys with K
+        right - 1
     }
 
     // auto FindChildIndex(const KeyType &key, const KeyComparator &comparator) const -> int;
