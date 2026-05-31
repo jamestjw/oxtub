@@ -211,8 +211,6 @@ impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
         let size = self.curr_size();
         let insert_idx = after_idx + 1;
 
-        assert!(size < self.max_size());
-
         for i in (insert_idx..size).rev() {
             let key = *self.key_at(i);
             let rid = *self.rid_at(i);
@@ -224,6 +222,21 @@ impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
         self.set_index_key_at(insert_idx, &key, &rid);
         self.set_value_at(insert_idx, val);
         self.header_mut().current_size += 1;
+    }
+
+    pub fn remove_at(&mut self, idx: usize) {
+        let size = self.curr_size();
+        assert!(idx < size);
+
+        for i in idx..(size - 1) {
+            let key = *self.key_at(i + 1);
+            let rid = *self.rid_at(i + 1);
+            let val = *self.value_at(i + 1);
+            self.set_index_key_at(i, &key, &rid);
+            self.set_value_at(i, val);
+        }
+
+        self.header_mut().current_size -= 1;
     }
 
     // void RemoveAt(int index);
@@ -444,5 +457,62 @@ slot 5: key=(40, rid=4:1), value=104
         }
 
         page.insert_after(&100, 5, Rid::new(0, 1), 101);
+    }
+
+    #[test]
+    fn remove_at_shifts_entries_left_when_removing_first_middle_and_last_slot() {
+        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+
+        set_size(&mut page, 6);
+        page.set_value_at(0, 100);
+        for idx in 1..6 {
+            page.set_index_key_at(idx, &(idx as u64 * 10), &Rid::new(idx, 1));
+            page.set_value_at(idx, 100 + idx as PageId);
+        }
+
+        expect![[r#"
+size=6, max_size=409
+slot 0: key=<invalid>, value=100
+slot 1: key=(10, rid=1:1), value=101
+slot 2: key=(20, rid=2:1), value=102
+slot 3: key=(30, rid=3:1), value=103
+slot 4: key=(40, rid=4:1), value=104
+slot 5: key=(50, rid=5:1), value=105
+"#]]
+        .assert_eq(&draw_internal_page(&page));
+
+        page.remove_at(0);
+
+        expect![[r#"
+size=5, max_size=409
+slot 0: key=<invalid>, value=101
+slot 1: key=(20, rid=2:1), value=102
+slot 2: key=(30, rid=3:1), value=103
+slot 3: key=(40, rid=4:1), value=104
+slot 4: key=(50, rid=5:1), value=105
+"#]]
+        .assert_eq(&draw_internal_page(&page));
+
+        page.remove_at(2);
+
+        expect![[r#"
+size=4, max_size=409
+slot 0: key=<invalid>, value=101
+slot 1: key=(20, rid=2:1), value=102
+slot 2: key=(40, rid=4:1), value=104
+slot 3: key=(50, rid=5:1), value=105
+"#]]
+        .assert_eq(&draw_internal_page(&page));
+
+        page.remove_at(3);
+
+        expect![[r#"
+size=3, max_size=409
+slot 0: key=<invalid>, value=101
+slot 1: key=(20, rid=2:1), value=102
+slot 2: key=(40, rid=4:1), value=104
+"#]]
+        .assert_eq(&draw_internal_page(&page));
     }
 }
