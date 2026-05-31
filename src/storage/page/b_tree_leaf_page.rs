@@ -4,7 +4,7 @@ use bytemuck::Pod;
 
 use crate::{
     buffer::page::{INVALID_PAGE_ID, PageBytes},
-    common::alignment::align_up,
+    common::alignment::{align_up, max_usize},
     storage::{
         disk::config::DEFAULT_PAGE_SIZE,
         index::comparator::KeyComparator,
@@ -373,10 +373,6 @@ fn compare_rid(a: &Rid, b: &Rid) -> std::cmp::Ordering {
     a.page_id
         .cmp(&b.page_id)
         .then_with(|| a.slot_id.cmp(&b.slot_id))
-}
-
-const fn max_usize(a: usize, b: usize) -> usize {
-    if a > b { a } else { b }
 }
 
 const fn leaf_page_max_size<K, const TOMB_CAP: usize>() -> usize {

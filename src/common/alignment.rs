@@ -12,6 +12,10 @@ pub const fn align_up(offset: usize, align: usize) -> usize {
     (offset + align - 1) & !(align - 1)
 }
 
+pub const fn max_usize(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
