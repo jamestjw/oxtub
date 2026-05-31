@@ -206,8 +206,22 @@ impl<'a, K: bytemuck::Pod> BTreeInternalPageMut<'a, K> {
         right - 1
     }
 
-    // auto FindChildIndex(const KeyType &key, const KeyComparator &comparator) const -> int;
-    // void InsertAfter(const ValueType &old_value, const KeyType &new_key, const ValueType &new_value);
+    pub fn insert_after(&mut self, after: &PageId, key: K, rid: Rid, val: PageId) {
+        let after_idx = self.value_idx(after).expect("existing child ptr not found");
+
+        for i in ((after_idx + 1)..self.curr_size()).rev() {
+            let key = *self.key_at(i - 1);
+            let rid = *self.rid_at(i - 1);
+            let val = *self.value_at(i - 1);
+            self.set_value_at(i, val);
+            self.set_index_key_at(i, &key, &rid);
+        }
+
+        self.set_index_key_at(after_idx + 1, &key, &rid);
+        self.set_value_at(after_idx + 1, val);
+        self.header_mut().current_size += 1;
+    }
+
     // void RemoveAt(int index);
     // auto SplitTo(BPlusTreeInternalPage *recipient) -> KeyType;
 }
