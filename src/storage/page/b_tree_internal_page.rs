@@ -400,6 +400,9 @@ mod tests {
 
     struct U64Comparator;
 
+    #[repr(align(8))]
+    struct TestPageData<const PAGE_SIZE: usize>([u8; PAGE_SIZE]);
+
     impl KeyComparator<u64> for U64Comparator {
         fn compare(&self, a: &u64, b: &u64) -> Ordering {
             a.cmp(b)
@@ -447,8 +450,8 @@ mod tests {
 
     #[test]
     fn find_child_idx_returns_only_child_when_page_has_no_separator_keys() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
-        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+        let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
         let comparator = U64Comparator;
 
         set_size(&mut page, 1);
@@ -462,8 +465,8 @@ mod tests {
 
     #[test]
     fn find_child_idx_routes_to_left_child_for_matching_separator_key() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
-        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+        let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
         let comparator = U64Comparator;
 
         set_size(&mut page, 4);
@@ -484,8 +487,8 @@ mod tests {
 
     #[test]
     fn find_child_idx_routes_between_distinct_separator_keys() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
-        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+        let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
         let comparator = U64Comparator;
 
         set_size(&mut page, 4);
@@ -505,7 +508,7 @@ mod tests {
 
     #[test]
     fn immutable_internal_page_reads_entries_written_by_mutable_page() {
-        let mut data = crate::buffer::page::PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
         let comparator = U64Comparator;
 
         {
@@ -533,8 +536,8 @@ mod tests {
 
     #[test]
     fn find_child_idx_returns_leftmost_possible_child_for_duplicate_separator_keys() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
-        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+        let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
         let comparator = U64Comparator;
 
         set_size(&mut page, 6);
@@ -555,8 +558,8 @@ mod tests {
 
     #[test]
     fn insert_after_shifts_entries_when_inserting_after_first_middle_and_last_child() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
-        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+        let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
 
         set_size(&mut page, 3);
         page.set_value_at(0, 100);
@@ -613,8 +616,8 @@ slot 5: key=(40, rid=4:1), value=104
     #[test]
     #[should_panic(expected = "existing child ptr not found")]
     fn insert_after_panics_when_child_pointer_is_missing() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
-        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+        let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
 
         set_size(&mut page, 1);
         page.set_value_at(0, 100);
@@ -625,8 +628,8 @@ slot 5: key=(40, rid=4:1), value=104
     #[test]
     #[should_panic]
     fn insert_after_panics_when_page_is_full() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
-        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+        let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
 
         let max_size = page.max_size();
         set_size(&mut page, max_size);
@@ -641,10 +644,10 @@ slot 5: key=(40, rid=4:1), value=104
 
     #[test]
     fn split_to_promotes_middle_key_and_moves_right_half_to_recipient() {
-        let mut source_data = [0; 128];
-        let mut recipient_data = [0; 128];
-        let mut source = BTreeInternalPageMut::<u64, 128>::init(&mut source_data);
-        let mut recipient = BTreeInternalPageMut::<u64, 128>::init(&mut recipient_data);
+        let mut source_data = TestPageData([0; 128]);
+        let mut recipient_data = TestPageData([0; 128]);
+        let mut source = BTreeInternalPageMut::<u64, 128>::init(&mut source_data.0);
+        let mut recipient = BTreeInternalPageMut::<u64, 128>::init(&mut recipient_data.0);
 
         let max_size = source.max_size();
         assert_eq!(max_size, 6);
@@ -691,8 +694,8 @@ slot 2: key=(50, rid=5:1), value=105
 
     #[test]
     fn remove_at_shifts_entries_left_when_removing_first_middle_and_last_slot() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
-        let mut page = BTreeInternalPageMut::<u64>::init(&mut data);
+        let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
 
         set_size(&mut page, 6);
         page.set_value_at(0, 100);

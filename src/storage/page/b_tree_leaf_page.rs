@@ -402,7 +402,10 @@ const fn leaf_page_max_size<K, const TOMB_CAP: usize>() -> usize {
 mod tests {
     use std::cmp::Ordering;
 
-    use crate::{buffer::page::INVALID_PAGE_ID, storage::disk::config::DEFAULT_PAGE_SIZE};
+    use crate::{
+        buffer::page::{INVALID_PAGE_ID, PageData},
+        storage::disk::config::DEFAULT_PAGE_SIZE,
+    };
 
     use super::*;
 
@@ -416,13 +419,13 @@ mod tests {
 
     #[test]
     fn init_sets_leaf_header_defaults() {
-        let mut data = [0xff; DEFAULT_PAGE_SIZE];
+        let mut data = PageData([0xff; DEFAULT_PAGE_SIZE]);
 
         {
-            let _leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
+            let _leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data.0);
         }
 
-        let leaf = BTreeLeafPage::<u64, 8>::from_data(&data);
+        let leaf = BTreeLeafPage::<u64, 8>::from_data(&data.0);
         assert!(leaf.header().common.is_leaf());
         assert_eq!(leaf.max_size(), BTreeLeafPageMut::<u64, 8>::MAX_SIZE);
         assert_eq!(leaf.get_next_page_id(), INVALID_PAGE_ID);
@@ -431,11 +434,11 @@ mod tests {
 
     #[test]
     fn full_page_entries_round_trip() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
         let max_size = BTreeLeafPageMut::<u32, 8>::MAX_SIZE;
 
         {
-            let mut leaf = BTreeLeafPageMut::<u32, 8>::init(&mut data);
+            let mut leaf = BTreeLeafPageMut::<u32, 8>::init(&mut data.0);
             leaf.header_mut().common.current_size = max_size as u16;
 
             for idx in 0..max_size {
@@ -443,7 +446,7 @@ mod tests {
             }
         }
 
-        let leaf = BTreeLeafPage::<u32, 8>::from_data(&data);
+        let leaf = BTreeLeafPage::<u32, 8>::from_data(&data.0);
 
         for idx in 0..max_size {
             assert_eq!(*leaf.key_at(idx), idx as u32 + 100);
@@ -453,10 +456,10 @@ mod tests {
 
     #[test]
     fn insert_at_shifts_entries_right() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
 
         {
-            let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
+            let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data.0);
             leaf.header_mut().common.current_size = 3;
             leaf.write_entry(0, &10, &Rid::new(1, 10));
             leaf.write_entry(1, &30, &Rid::new(1, 30));
@@ -465,7 +468,7 @@ mod tests {
             leaf.insert_at(1, &20, &Rid::new(1, 20));
         }
 
-        let leaf = BTreeLeafPage::<u64, 8>::from_data(&data);
+        let leaf = BTreeLeafPage::<u64, 8>::from_data(&data.0);
         assert_eq!(leaf.curr_size(), 4);
         assert_eq!(*leaf.key_at(0), 10);
         assert_eq!(*leaf.value_at(0), Rid::new(1, 10));
@@ -479,15 +482,15 @@ mod tests {
 
     #[test]
     fn insert_at_allows_empty_and_end_insert() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
 
         {
-            let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
+            let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data.0);
             leaf.insert_at(0, &10, &Rid::new(1, 10));
             leaf.insert_at(1, &20, &Rid::new(1, 20));
         }
 
-        let leaf = BTreeLeafPage::<u64, 8>::from_data(&data);
+        let leaf = BTreeLeafPage::<u64, 8>::from_data(&data.0);
         assert_eq!(leaf.curr_size(), 2);
         assert_eq!(*leaf.key_at(0), 10);
         assert_eq!(*leaf.value_at(0), Rid::new(1, 10));
@@ -497,9 +500,9 @@ mod tests {
 
     #[test]
     fn insert_at_panics_when_page_is_full() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
+        let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
         let max_size = BTreeLeafPageMut::<u64, 8>::MAX_SIZE;
-        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
+        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data.0);
 
         for idx in 0..max_size {
             leaf.insert_at(idx, &(idx as u64), &Rid::new(1, idx));
@@ -516,8 +519,8 @@ mod tests {
 
     #[test]
     fn insert_at_shifts_tombstone_indexes() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
-        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
+        let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data.0);
         leaf.header_mut().common.current_size = 3;
         leaf.header_mut().num_tombstones = 3;
         leaf.write_entry(0, &10, &Rid::new(1, 10));
@@ -538,10 +541,10 @@ mod tests {
 
     #[test]
     fn move_split_entries_to_moves_entries_and_shrinks_source() {
-        let mut source_data = [0; DEFAULT_PAGE_SIZE];
-        let mut recipient_data = [0; DEFAULT_PAGE_SIZE];
-        let mut source = BTreeLeafPageMut::<u64, 8>::init(&mut source_data);
-        let mut recipient = BTreeLeafPageMut::<u64, 8>::init(&mut recipient_data);
+        let mut source_data = PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut recipient_data = PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut source = BTreeLeafPageMut::<u64, 8>::init(&mut source_data.0);
+        let mut recipient = BTreeLeafPageMut::<u64, 8>::init(&mut recipient_data.0);
 
         source.set_size(4);
         source.write_entry(0, &10, &Rid::new(1, 10));
@@ -565,10 +568,10 @@ mod tests {
 
     #[test]
     fn move_split_entries_to_preserves_left_tombstones_and_skips_moved_tombstones() {
-        let mut source_data = [0; DEFAULT_PAGE_SIZE];
-        let mut recipient_data = [0; DEFAULT_PAGE_SIZE];
-        let mut source = BTreeLeafPageMut::<u64, 8>::init(&mut source_data);
-        let mut recipient = BTreeLeafPageMut::<u64, 8>::init(&mut recipient_data);
+        let mut source_data = PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut recipient_data = PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut source = BTreeLeafPageMut::<u64, 8>::init(&mut source_data.0);
+        let mut recipient = BTreeLeafPageMut::<u64, 8>::init(&mut recipient_data.0);
 
         source.set_size(5);
         for idx in 0..5 {
@@ -593,8 +596,8 @@ mod tests {
 
     #[test]
     fn find_pos_returns_first_matching_logical_key() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
-        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
+        let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data.0);
         leaf.header_mut().common.current_size = 5;
         leaf.write_entry(0, &10, &Rid::new(1, 1));
         leaf.write_entry(1, &20, &Rid::new(1, 1));
@@ -609,8 +612,8 @@ mod tests {
 
     #[test]
     fn find_insert_pos_uses_rid_as_tiebreaker() {
-        let mut data = [0; DEFAULT_PAGE_SIZE];
-        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data);
+        let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data.0);
         leaf.header_mut().common.current_size = 4;
         leaf.write_entry(0, &10, &Rid::new(1, 1));
         leaf.write_entry(1, &20, &Rid::new(1, 1));
