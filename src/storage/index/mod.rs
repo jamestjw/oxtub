@@ -1,2 +1,2 @@
-pub mod btree;
+pub mod b_tree;
 pub mod comparator;

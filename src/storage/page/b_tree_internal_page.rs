@@ -142,6 +142,7 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageView<'a, K, 
         &self.values()[idx]
     }
 
+    // Returns first child that could contain the key
     fn find_child_idx<C>(&self, key: &K, c: &C) -> usize
     where
         C: KeyComparator<K>,
@@ -385,9 +386,6 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
     pub fn min_size(&self) -> usize {
         (self.max_size() + 1) / 2
     }
-
-    // void RemoveAt(int index);
-    // auto SplitTo(BPlusTreeInternalPage *recipient) -> KeyType;
 }
 
 #[cfg(test)]

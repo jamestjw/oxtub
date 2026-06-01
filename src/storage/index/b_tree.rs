@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use crate::{
     buffer::{
         bpm::BufferPoolManager,
-        page::INVALID_PAGE_ID,
+        page::{INVALID_PAGE_ID, PageBytes},
         page_guard::{ReadPageGuard, WritePageGuard},
     },
     common::types::PageId,
@@ -11,6 +11,7 @@ use crate::{
         index::comparator::{self, KeyComparator},
         page::{
             b_tree_internal_page::BTreeInternalPage,
+            b_tree_leaf_page::BTreeLeafPage,
             b_tree_node_header::BTreeNodeHeader,
             b_tree_root_page::{BTreeRootPage, BTreeRootPageMut},
         },
@@ -68,7 +69,7 @@ impl<'a> BTreeContext<'a> {
 // The BTree has a header page that holds the page_id of the actual
 // root of the tree. This page will be alive as long as the BTree is
 // alive. If the tree is empty, then the root_id will be INVALID_PAGE_ID.
-pub struct BTree<'a, K, C>
+pub struct BTree<'a, K, C, const TOMB_CAP: usize>
 where
     C: KeyComparator<K>,
 {
@@ -78,7 +79,9 @@ where
     _marker: PhantomData<K>,
 }
 
-impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>> BTree<'a, K, C> {
+impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
+    BTree<'a, K, C, TOMB_CAP>
+{
     pub fn new(bpm: &'a BufferPoolManager, header_page_id: PageId, comparator: &'a C) -> Self {
         let btree = Self {
             bpm,
@@ -105,13 +108,21 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>> BTree<'a, K, C> {
             .expect("unexpected buffer pool error")
     }
 
+    fn internal_page<'page>(data: &'page PageBytes) -> BTreeInternalPage<'page, K> {
+        BTreeInternalPage::from_data(data)
+    }
+
+    fn leaf_page<'page>(data: &'page PageBytes) -> BTreeLeafPage<'page, K, TOMB_CAP> {
+        BTreeLeafPage::from_data(data)
+    }
+
     pub fn is_empty(&self) -> bool {
         let guard = self.header_guard();
         BTreeRootPage::from_data(guard.data()).root_page_id() == INVALID_PAGE_ID
     }
 
     pub fn get_values(&self, key: &K) -> Vec<Rid> {
-        let mut current_page_id = {
+        let current_page_id = {
             let header_guard = self.header_guard();
             let root_page = BTreeRootPage::from_data(header_guard.data());
 
@@ -124,18 +135,45 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>> BTree<'a, K, C> {
         let mut current_guard = self.get_read_guard(current_page_id);
 
         while !BTreeNodeHeader::from_data(current_guard.data()).is_leaf() {
-            let internal_page = BTreeInternalPage::<K>::from_data(current_guard.data());
+            let internal_page = Self::internal_page(current_guard.data());
+            let next_page_id =
+                internal_page.value_at(internal_page.find_child_idx(key, self.comparator));
+            current_guard = self.get_read_guard(*next_page_id);
         }
 
-        // auto current_guard = bpm_->ReadPage(current_page_id);
-        // while (!current_guard.As<BPlusTreePage>()->IsLeafPage()) {
-        //   auto internal = current_guard.As<InternalPage>();
-        //   page_id_t next_page_id = internal->ValueAt(FindChildInInternal(internal, key));
-        //   auto next_guard = bpm_->ReadPage(next_page_id);
-        //   current_guard.Drop();
-        //   current_guard = std::move(next_guard);
-        // }
+        let mut idx = {
+            let leaf = Self::leaf_page(current_guard.data());
+            leaf.find_pos(key, self.comparator)
+        };
 
-        vec![]
+        let mut result = vec![];
+
+        loop {
+            let next_page_id = {
+                let leaf = Self::leaf_page(current_guard.data());
+
+                while idx < leaf.curr_size() {
+                    match self.comparator.compare(leaf.key_at(idx), key) {
+                        std::cmp::Ordering::Less => idx += 1,
+                        std::cmp::Ordering::Equal => {
+                            if !leaf.is_idx_tombstoned(idx) {
+                                result.push(*leaf.value_at(idx));
+                            }
+                            idx += 1;
+                        }
+                        std::cmp::Ordering::Greater => return result,
+                    }
+                }
+
+                leaf.get_next_page_id()
+            };
+
+            if next_page_id == INVALID_PAGE_ID {
+                return result;
+            }
+
+            current_guard = self.get_read_guard(next_page_id);
+            idx = 0;
+        }
     }
 }

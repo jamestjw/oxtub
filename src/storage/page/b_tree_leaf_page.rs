@@ -16,13 +16,17 @@ use crate::{
     },
 };
 
-pub struct BTreeLeafPage<'a, K, const TOMB_CAP: usize> {
-    data: &'a [u8],
+struct BTreeLeafPageView<'a, K, const TOMB_CAP: usize> {
+    data: &'a PageBytes,
     _marker: PhantomData<K>,
 }
 
+pub struct BTreeLeafPage<'a, K, const TOMB_CAP: usize> {
+    view: BTreeLeafPageView<'a, K, TOMB_CAP>,
+}
+
 pub struct BTreeLeafPageMut<'a, K, const TOMB_CAP: usize> {
-    data: &'a mut [u8],
+    data: &'a mut PageBytes,
     _marker: PhantomData<K>,
 }
 
@@ -52,7 +56,7 @@ pub struct BTreeLeafHeader {
     // 16 bytes header
 }
 
-impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
+impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageView<'a, K, TOMB_CAP> {
     const HEADER_SIZE: usize = size_of::<BTreeLeafHeader>();
     const TOMBSTONES_OFFSET: usize = Self::HEADER_SIZE;
     const ENTRY_ALIGN: usize = max_usize(align_of::<K>(), align_of::<Rid>());
@@ -64,7 +68,7 @@ impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
     const ENTRY_SIZE: usize =
         align_up(Self::ENTRY_RID_OFFSET + size_of::<Rid>(), Self::ENTRY_ALIGN);
 
-    pub fn from_data(data: &'a PageBytes) -> Self {
+    fn from_data(data: &'a PageBytes) -> Self {
         Self {
             data,
             _marker: PhantomData,
@@ -76,15 +80,15 @@ impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
         bytemuck::from_bytes(header_bytes)
     }
 
-    pub fn get_tombstone_count(&self) -> usize {
+    fn get_tombstone_count(&self) -> usize {
         self.header().num_tombstones as usize
     }
 
-    pub fn get_next_page_id(&self) -> PageId {
+    fn get_next_page_id(&self) -> PageId {
         self.header().next_page_id
     }
 
-    pub fn max_size(&self) -> usize {
+    fn max_size(&self) -> usize {
         self.header().common.max_size as usize
     }
 
@@ -114,129 +118,14 @@ impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
         bytemuck::from_bytes(&self.data[start..end])
     }
 
-    pub fn get_tombstoned_keys(&self) -> Vec<K> {
-        self.tombstones()[..self.get_tombstone_count()]
-            .iter()
-            .map(|idx| *self.key_ref(usize::from(*idx)))
-            .collect()
-    }
-
-    pub fn key_at(&self, idx: usize) -> &K {
+    fn key_at(&self, idx: usize) -> &K {
         assert!(idx < self.curr_size());
         self.key_ref(idx)
     }
 
-    pub fn value_at(&self, idx: usize) -> &Rid {
+    fn value_at(&self, idx: usize) -> &Rid {
         assert!(idx < self.curr_size());
         self.rid_ref(idx)
-    }
-}
-
-impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
-    pub const MAX_SIZE: usize = leaf_page_max_size::<K, TOMB_CAP>();
-    const HEADER_SIZE: usize = size_of::<BTreeLeafHeader>();
-    const TOMBSTONES_OFFSET: usize = Self::HEADER_SIZE;
-    const ENTRY_ALIGN: usize = max_usize(align_of::<K>(), align_of::<Rid>());
-    const ENTRIES_OFFSET: usize = align_up(
-        Self::TOMBSTONES_OFFSET + TOMB_CAP * size_of::<TombstoneIndex>(),
-        Self::ENTRY_ALIGN,
-    );
-    const ENTRY_RID_OFFSET: usize = align_up(size_of::<K>(), align_of::<Rid>());
-    const ENTRY_SIZE: usize =
-        align_up(Self::ENTRY_RID_OFFSET + size_of::<Rid>(), Self::ENTRY_ALIGN);
-
-    // fn header(&self) -> &BTreeLeafHeader {
-    //     let header_bytes = &self.data[..size_of::<BTreeLeafHeader>()];
-    //     bytemuck::from_bytes(header_bytes)
-    // }
-    pub fn from_data(data: &'a mut PageBytes) -> Self {
-        Self {
-            data,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn init(data: &'a mut PageBytes) -> Self {
-        data.fill(0);
-
-        let mut page = Self::from_data(data);
-        let header = page.header_mut();
-        header.common.init(PAGE_TYPE_LEAF, Self::MAX_SIZE);
-        header.next_page_id = INVALID_PAGE_ID as u32;
-        header.num_tombstones = 0;
-        header._reserved = 0;
-
-        page
-    }
-
-    fn header(&self) -> &BTreeLeafHeader {
-        let header_bytes = &self.data[..size_of::<BTreeLeafHeader>()];
-        bytemuck::from_bytes(header_bytes)
-    }
-
-    fn header_mut(&mut self) -> &mut BTreeLeafHeader {
-        let header_bytes = &mut self.data[..size_of::<BTreeLeafHeader>()];
-        bytemuck::from_bytes_mut(header_bytes)
-    }
-
-    fn tombstones(&self) -> &[TombstoneIndex] {
-        let start = Self::TOMBSTONES_OFFSET;
-        let end = start + TOMB_CAP * size_of::<TombstoneIndex>();
-        bytemuck::cast_slice(&self.data[start..end])
-    }
-
-    fn tombstones_mut(&mut self) -> &mut [TombstoneIndex] {
-        let start = Self::TOMBSTONES_OFFSET;
-        let end = start + TOMB_CAP * size_of::<TombstoneIndex>();
-        bytemuck::cast_slice_mut(&mut self.data[start..end])
-    }
-
-    pub fn max_size(&self) -> usize {
-        self.header().common.max_size as usize
-    }
-
-    fn curr_size(&self) -> usize {
-        self.header().common.current_size as usize
-    }
-
-    fn num_tombstones(&self) -> usize {
-        self.header().num_tombstones as usize
-    }
-
-    fn entry_offset(idx: usize) -> usize {
-        Self::ENTRIES_OFFSET + idx * Self::ENTRY_SIZE
-    }
-
-    fn key_ref(&self, idx: usize) -> &K {
-        let start = Self::entry_offset(idx);
-        let end = start + size_of::<K>();
-        bytemuck::from_bytes(&self.data[start..end])
-    }
-
-    fn rid_ref(&self, idx: usize) -> &Rid {
-        let start = Self::entry_offset(idx) + Self::ENTRY_RID_OFFSET;
-        let end = start + size_of::<Rid>();
-        bytemuck::from_bytes(&self.data[start..end])
-    }
-
-    // pub fn get_tombstone_count(&self) -> usize {
-    //     self.header().num_tombstones as usize
-    // }
-    //
-    // pub fn get_next_page_id(&self) -> usize {
-    //     self.header().next_page_id as usize
-    // }
-
-    pub fn set_next_page_id(&mut self, page_id: PageId) {
-        self.header_mut().next_page_id = page_id;
-    }
-
-    pub fn set_size(&mut self, size: usize) {
-        self.header_mut().common.current_size = size as u16;
-    }
-
-    pub fn set_num_tombstones(&mut self, size: usize) {
-        self.header_mut().num_tombstones = size as u16;
     }
 
     fn lower_bound_by<F>(&self, compare_entry: F) -> usize
@@ -262,14 +151,14 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         left
     }
 
-    pub fn find_pos<C>(&self, key: &K, c: &C) -> usize
+    fn find_pos<C>(&self, key: &K, c: &C) -> usize
     where
         C: KeyComparator<K>,
     {
         self.lower_bound_by(|idx| c.compare(self.key_ref(idx), key))
     }
 
-    pub fn find_insert_pos<C>(&self, key: &K, rid: &Rid, c: &C) -> usize
+    fn find_insert_pos<C>(&self, key: &K, rid: &Rid, c: &C) -> usize
     where
         C: KeyComparator<K>,
     {
@@ -277,6 +166,189 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
             c.compare(self.key_ref(idx), key)
                 .then_with(|| compare_rid(self.rid_ref(idx), rid))
         })
+    }
+
+    fn is_idx_tombstoned(&self, idx: usize) -> bool {
+        let tombstones = self.tombstones();
+
+        for i in 0..self.get_tombstone_count() {
+            if usize::from(tombstones[i]) == idx {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPageView<'a, K, TOMB_CAP> {
+    fn get_tombstoned_keys(&self) -> Vec<K> {
+        self.tombstones()[..self.get_tombstone_count()]
+            .iter()
+            .map(|idx| *self.key_ref(usize::from(*idx)))
+            .collect()
+    }
+}
+
+impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
+    pub fn from_data(data: &'a PageBytes) -> Self {
+        Self {
+            view: BTreeLeafPageView::from_data(data),
+        }
+    }
+
+    fn header(&self) -> &BTreeLeafHeader {
+        self.view.header()
+    }
+
+    pub fn get_tombstone_count(&self) -> usize {
+        self.view.get_tombstone_count()
+    }
+
+    pub fn get_next_page_id(&self) -> PageId {
+        self.view.get_next_page_id()
+    }
+
+    pub fn max_size(&self) -> usize {
+        self.view.max_size()
+    }
+
+    pub fn curr_size(&self) -> usize {
+        self.view.curr_size()
+    }
+
+    pub fn get_tombstoned_keys(&self) -> Vec<K> {
+        self.view.get_tombstoned_keys()
+    }
+
+    pub fn key_at(&self, idx: usize) -> &K {
+        self.view.key_at(idx)
+    }
+
+    pub fn value_at(&self, idx: usize) -> &Rid {
+        self.view.value_at(idx)
+    }
+
+    pub fn find_pos<C>(&self, key: &K, c: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        self.view.find_pos(key, c)
+    }
+
+    pub fn find_insert_pos<C>(&self, key: &K, rid: &Rid, c: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        self.view.find_insert_pos(key, rid, c)
+    }
+
+    pub fn is_idx_tombstoned(&self, idx: usize) -> bool {
+        self.view.is_idx_tombstoned(idx)
+    }
+}
+
+impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
+    pub const MAX_SIZE: usize = leaf_page_max_size::<K, TOMB_CAP>();
+
+    pub fn from_data(data: &'a mut PageBytes) -> Self {
+        Self {
+            data,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn init(data: &'a mut PageBytes) -> Self {
+        data.fill(0);
+
+        let mut page = Self::from_data(data);
+        let header = page.header_mut();
+        header.common.init(PAGE_TYPE_LEAF, Self::MAX_SIZE);
+        header.next_page_id = INVALID_PAGE_ID as u32;
+        header.num_tombstones = 0;
+        header._reserved = 0;
+
+        page
+    }
+
+    fn view(&self) -> BTreeLeafPageView<'_, K, TOMB_CAP> {
+        BTreeLeafPageView::from_data(&*self.data)
+    }
+
+    fn header(&self) -> &BTreeLeafHeader {
+        let header_bytes = &self.data[..size_of::<BTreeLeafHeader>()];
+        bytemuck::from_bytes(header_bytes)
+    }
+
+    fn header_mut(&mut self) -> &mut BTreeLeafHeader {
+        let header_bytes = &mut self.data[..size_of::<BTreeLeafHeader>()];
+        bytemuck::from_bytes_mut(header_bytes)
+    }
+
+    fn tombstones(&self) -> &[TombstoneIndex] {
+        let start = BTreeLeafPageView::<K, TOMB_CAP>::TOMBSTONES_OFFSET;
+        let end = start + TOMB_CAP * size_of::<TombstoneIndex>();
+        bytemuck::cast_slice(&self.data[start..end])
+    }
+
+    fn tombstones_mut(&mut self) -> &mut [TombstoneIndex] {
+        let start = BTreeLeafPageView::<K, TOMB_CAP>::TOMBSTONES_OFFSET;
+        let end = start + TOMB_CAP * size_of::<TombstoneIndex>();
+        bytemuck::cast_slice_mut(&mut self.data[start..end])
+    }
+
+    pub fn max_size(&self) -> usize {
+        self.view().max_size()
+    }
+
+    fn curr_size(&self) -> usize {
+        self.view().curr_size()
+    }
+
+    fn num_tombstones(&self) -> usize {
+        self.view().get_tombstone_count()
+    }
+
+    fn entry_offset(idx: usize) -> usize {
+        BTreeLeafPageView::<K, TOMB_CAP>::entry_offset(idx)
+    }
+
+    fn key_ref(&self, idx: usize) -> &K {
+        let start = Self::entry_offset(idx);
+        let end = start + size_of::<K>();
+        bytemuck::from_bytes(&self.data[start..end])
+    }
+
+    fn rid_ref(&self, idx: usize) -> &Rid {
+        let start = Self::entry_offset(idx) + BTreeLeafPageView::<K, TOMB_CAP>::ENTRY_RID_OFFSET;
+        let end = start + size_of::<Rid>();
+        bytemuck::from_bytes(&self.data[start..end])
+    }
+
+    pub fn set_next_page_id(&mut self, page_id: PageId) {
+        self.header_mut().next_page_id = page_id;
+    }
+
+    pub fn set_size(&mut self, size: usize) {
+        self.header_mut().common.current_size = size as u16;
+    }
+
+    pub fn set_num_tombstones(&mut self, size: usize) {
+        self.header_mut().num_tombstones = size as u16;
+    }
+
+    pub fn find_pos<C>(&self, key: &K, c: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        self.view().find_pos(key, c)
+    }
+
+    pub fn find_insert_pos<C>(&self, key: &K, rid: &Rid, c: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        self.view().find_insert_pos(key, rid, c)
     }
 
     // Caller must ensure that the page is not already full, if this condition
@@ -305,8 +377,10 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         let src_start = Self::entry_offset(src_idx);
         let dst_start = Self::entry_offset(dst_idx);
 
-        self.data
-            .copy_within(src_start..src_start + Self::ENTRY_SIZE, dst_start);
+        self.data.copy_within(
+            src_start..src_start + BTreeLeafPageView::<K, TOMB_CAP>::ENTRY_SIZE,
+            dst_start,
+        );
     }
 
     fn write_entry(&mut self, idx: usize, key: &K, rid: &Rid) {
@@ -316,7 +390,7 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         let key_end = key_start + size_of::<K>();
         self.data[key_start..key_end].copy_from_slice(bytemuck::bytes_of(key));
 
-        let rid_start = key_start + Self::ENTRY_RID_OFFSET;
+        let rid_start = key_start + BTreeLeafPageView::<K, TOMB_CAP>::ENTRY_RID_OFFSET;
         let rid_end = rid_start + size_of::<Rid>();
         self.data[rid_start..rid_end].copy_from_slice(bytemuck::bytes_of(rid));
     }
@@ -357,16 +431,8 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         self.set_size(start_idx);
     }
 
-    fn is_idx_tombstoned(&self, idx: usize) -> bool {
-        let tombstones = self.tombstones();
-
-        for i in 0..self.num_tombstones() {
-            if usize::from(tombstones[i]) == idx {
-                return true;
-            }
-        }
-
-        false
+    pub fn is_idx_tombstoned(&self, idx: usize) -> bool {
+        self.view().is_idx_tombstoned(idx)
     }
 }
 
