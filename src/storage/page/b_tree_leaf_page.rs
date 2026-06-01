@@ -162,10 +162,15 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageView<'a, K, TOMB_CAP> {
     where
         C: KeyComparator<K>,
     {
-        self.lower_bound_by(|idx| {
-            c.compare(self.key_ref(idx), key)
-                .then_with(|| compare_rid(self.rid_ref(idx), rid))
-        })
+        self.lower_bound_by(|idx| self.cmp_key_rid_to_idx(key, rid, idx, c))
+    }
+
+    fn cmp_key_rid_to_idx<C>(&self, key: &K, rid: &Rid, idx: usize, c: &C) -> std::cmp::Ordering
+    where
+        C: KeyComparator<K>,
+    {
+        c.compare(self.key_ref(idx), key)
+            .then_with(|| compare_rid(self.rid_ref(idx), rid))
     }
 
     fn is_idx_tombstoned(&self, idx: usize) -> bool {
@@ -179,14 +184,18 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageView<'a, K, TOMB_CAP> {
 
         false
     }
-}
 
-impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPageView<'a, K, TOMB_CAP> {
     fn get_tombstoned_keys(&self) -> Vec<K> {
         self.tombstones()[..self.get_tombstone_count()]
             .iter()
             .map(|idx| *self.key_ref(usize::from(*idx)))
             .collect()
+    }
+
+    fn is_insert_safe(&self) -> bool {
+        // Since we split leaf pages if their size == maxSize after insertion, we need
+        // to ensure that even after adding one entry, the size is still < maxSize
+        self.curr_size() + 1 < self.max_size()
     }
 }
 
@@ -245,6 +254,17 @@ impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
 
     pub fn is_idx_tombstoned(&self, idx: usize) -> bool {
         self.view.is_idx_tombstoned(idx)
+    }
+
+    pub fn cmp_key_rid_to_idx<C>(&self, key: &K, rid: &Rid, idx: usize, c: &C) -> std::cmp::Ordering
+    where
+        C: KeyComparator<K>,
+    {
+        self.view.cmp_key_rid_to_idx(key, rid, idx, c)
+    }
+
+    pub fn is_insert_safe(&self) -> bool {
+        self.view.is_insert_safe()
     }
 }
 
