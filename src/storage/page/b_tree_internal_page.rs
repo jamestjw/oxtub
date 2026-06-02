@@ -171,6 +171,39 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageView<'a, K, 
         // immediate left could also contain keys with K
         right - 1
     }
+
+    // Returns the exact child for a full index key `(K, Rid)`.
+    fn find_child_idx_for_insert<C>(&self, key: &K, rid: &Rid, c: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        let size = self.curr_size();
+        assert!(size > 0);
+
+        let mut left = 0;
+        let mut right = size;
+
+        while right - left > 1 {
+            let mid = left + ((right - left) / 2);
+            debug_assert!(mid > 0);
+
+            if self.cmp_index_key_to(mid, key, rid, c).is_le() {
+                left = mid;
+            } else {
+                right = mid;
+            }
+        }
+
+        left
+    }
+
+    fn cmp_index_key_to<C>(&self, idx: usize, key: &K, rid: &Rid, c: &C) -> std::cmp::Ordering
+    where
+        C: KeyComparator<K>,
+    {
+        c.compare(self.key_ref(idx), key)
+            .then_with(|| compare_rid(self.rid_ref(idx), rid))
+    }
 }
 
 impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPage<'a, K, PAGE_SIZE> {
@@ -201,6 +234,13 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPage<'a, K, PAGE
         C: KeyComparator<K>,
     {
         self.view.find_child_idx(key, c)
+    }
+
+    pub fn find_child_idx_for_insert<C>(&self, key: &K, rid: &Rid, c: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        self.view.find_child_idx_for_insert(key, rid, c)
     }
 }
 
@@ -320,6 +360,13 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
         self.view().find_child_idx(key, c)
     }
 
+    pub fn find_child_idx_for_insert<C>(&self, key: &K, rid: &Rid, c: &C) -> usize
+    where
+        C: KeyComparator<K>,
+    {
+        self.view().find_child_idx_for_insert(key, rid, c)
+    }
+
     pub fn insert_after(&mut self, after: &PageId, key: K, rid: Rid, val: PageId) {
         let after_idx = self.value_idx(after).expect("existing child ptr not found");
         let size = self.curr_size();
@@ -386,6 +433,12 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
     pub fn min_size(&self) -> usize {
         (self.max_size() + 1) / 2
     }
+}
+
+fn compare_rid(a: &Rid, b: &Rid) -> std::cmp::Ordering {
+    a.page_id
+        .cmp(&b.page_id)
+        .then_with(|| a.slot_id.cmp(&b.slot_id))
 }
 
 #[cfg(test)]
@@ -484,6 +537,43 @@ mod tests {
     }
 
     #[test]
+    fn find_child_idx_for_insert_routes_by_full_index_key() {
+        let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
+        let comparator = U64Comparator;
+
+        set_size(&mut page, 4);
+        page.set_index_key_at(1, &10, &Rid::new(1, 1));
+        page.set_index_key_at(2, &20, &Rid::new(2, 1));
+        page.set_index_key_at(3, &30, &Rid::new(3, 1));
+
+        assert_eq!(
+            page.find_child_idx_for_insert(&0, &Rid::new(0, 0), &comparator),
+            0
+        );
+        assert_eq!(
+            page.find_child_idx_for_insert(&10, &Rid::new(1, 0), &comparator),
+            0
+        );
+        assert_eq!(
+            page.find_child_idx_for_insert(&10, &Rid::new(1, 1), &comparator),
+            1
+        );
+        assert_eq!(
+            page.find_child_idx_for_insert(&10, &Rid::new(1, 2), &comparator),
+            1
+        );
+        assert_eq!(
+            page.find_child_idx_for_insert(&30, &Rid::new(3, 1), &comparator),
+            3
+        );
+        assert_eq!(
+            page.find_child_idx_for_insert(&40, &Rid::new(4, 1), &comparator),
+            3
+        );
+    }
+
+    #[test]
     fn find_child_idx_routes_between_distinct_separator_keys() {
         let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
         let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
@@ -552,6 +642,45 @@ mod tests {
         assert_eq!(page.find_child_idx(&21, &comparator), 4);
         assert_eq!(page.find_child_idx(&30, &comparator), 4);
         assert_eq!(page.find_child_idx(&31, &comparator), 5);
+    }
+
+    #[test]
+    fn find_child_idx_for_insert_uses_rid_for_duplicate_separator_keys() {
+        let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
+        let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
+        let comparator = U64Comparator;
+
+        set_size(&mut page, 6);
+        page.set_index_key_at(1, &10, &Rid::new(1, 1));
+        page.set_index_key_at(2, &20, &Rid::new(2, 1));
+        page.set_index_key_at(3, &20, &Rid::new(2, 2));
+        page.set_index_key_at(4, &20, &Rid::new(2, 3));
+        page.set_index_key_at(5, &30, &Rid::new(3, 1));
+
+        assert_eq!(
+            page.find_child_idx_for_insert(&20, &Rid::new(2, 0), &comparator),
+            1
+        );
+        assert_eq!(
+            page.find_child_idx_for_insert(&20, &Rid::new(2, 1), &comparator),
+            2
+        );
+        assert_eq!(
+            page.find_child_idx_for_insert(&20, &Rid::new(2, 2), &comparator),
+            3
+        );
+        assert_eq!(
+            page.find_child_idx_for_insert(&20, &Rid::new(2, 3), &comparator),
+            4
+        );
+        assert_eq!(
+            page.find_child_idx_for_insert(&20, &Rid::new(2, 4), &comparator),
+            4
+        );
+        assert_eq!(
+            page.find_child_idx_for_insert(&21, &Rid::new(2, 0), &comparator),
+            4
+        );
     }
 
     #[test]

@@ -321,8 +321,23 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         self.view().max_size()
     }
 
-    fn curr_size(&self) -> usize {
+    pub fn curr_size(&self) -> usize {
         self.view().curr_size()
+    }
+
+    pub fn is_idx_tombstoned(&self, idx: usize) -> bool {
+        self.view().is_idx_tombstoned(idx)
+    }
+
+    pub fn is_insert_safe(&self) -> bool {
+        self.view().is_insert_safe()
+    }
+
+    pub fn cmp_key_rid_to_idx<C>(&self, key: &K, rid: &Rid, idx: usize, c: &C) -> std::cmp::Ordering
+    where
+        C: KeyComparator<K>,
+    {
+        self.view().cmp_key_rid_to_idx(key, rid, idx, c)
     }
 
     fn num_tombstones(&self) -> usize {
@@ -451,8 +466,21 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         self.set_size(start_idx);
     }
 
-    pub fn is_idx_tombstoned(&self, idx: usize) -> bool {
-        self.view().is_idx_tombstoned(idx)
+    // TODO: maybe should be more defensive and actually check if idx is a tombstone
+    pub fn remove_tombstone_at(&mut self, idx: usize) {
+        assert!(idx < self.curr_size());
+        let mut next_tombstone = 0;
+
+        for i in 0..self.num_tombstones() {
+            if usize::from(self.tombstones()[i]) == idx {
+                continue;
+            }
+
+            self.tombstones_mut()[next_tombstone] = self.tombstones()[i];
+            next_tombstone += 1;
+        }
+
+        self.set_num_tombstones(next_tombstone);
     }
 }
 

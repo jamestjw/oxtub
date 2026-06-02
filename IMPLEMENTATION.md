@@ -92,6 +92,24 @@ logical key matches.
 This layout is simple and correct, but duplicate-heavy indexes repeat the same
 key many times.
 
+## Current Tombstone Limitations
+
+The current leaf-page tombstones are logical delete markers over physical
+entries ordered by `(K, Rid)`. A tombstone stores an index into the leaf entry
+array; it does not create a reusable free slot.
+
+This means tombstones only help if the exact same `(K, Rid)` pair is inserted
+again and we explicitly clear that tombstone. In normal table usage, a later
+insert for the same logical key usually has a different `Rid`, so the tombstoned
+entry cannot be reused.
+
+Tombstoned entries also still count toward `curr_size()`, so they reduce usable
+leaf capacity until a split or compaction path physically drops them.
+
+For now, prefer running the B-tree with `TOMB_CAP = 0`. Tombstones should be
+revisited once the leaf layout supports real compaction/reuse, or once we have a
+specific MVCC/delete protocol that benefits from delayed physical removal.
+
 ## Future Duplicate Deduplication With Posting Lists
 
 A future optimization can store duplicate keys as posting-list cells:

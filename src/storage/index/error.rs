@@ -9,4 +9,7 @@ pub enum BTreeError {
 
     #[error("operation requires a non-empty tree")]
     EmptyTree,
+
+    #[error("key-value pair already exists")]
+    Duplicate,
 }

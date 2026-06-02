@@ -14,7 +14,7 @@ use crate::{
         },
         page::{
             b_tree_internal_page::BTreeInternalPage,
-            b_tree_leaf_page::BTreeLeafPage,
+            b_tree_leaf_page::{BTreeLeafPage, BTreeLeafPageMut},
             b_tree_node_header::BTreeNodeHeader,
             b_tree_root_page::{BTreeRootPage, BTreeRootPageMut},
         },
@@ -113,12 +113,20 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         Ok(self.bpm.read_page(page_id)?)
     }
 
+    fn get_write_guard(&self, page_id: PageId) -> Result<WritePageGuard<'_>, BTreeError> {
+        Ok(self.bpm.write_page(page_id)?)
+    }
+
     fn internal_page<'page>(data: &'page PageBytes) -> BTreeInternalPage<'page, K> {
         BTreeInternalPage::from_data(data)
     }
 
     fn leaf_page<'page>(data: &'page PageBytes) -> BTreeLeafPage<'page, K, TOMB_CAP> {
         BTreeLeafPage::from_data(data)
+    }
+
+    fn leaf_page_mut<'page>(data: &'page mut PageBytes) -> BTreeLeafPageMut<'page, K, TOMB_CAP> {
+        BTreeLeafPageMut::from_data(data)
     }
 
     pub fn is_empty(&self) -> Result<bool, BTreeError> {
@@ -200,31 +208,33 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         ctx.read_set.push(header_guard);
         ctx.read_set.push(self.bpm.read_page(current_page_id)?);
 
-        self.descend_read_path_for_insert(&mut ctx, key)?;
+        self.descend_read_path_for_insert(&mut ctx, key, value)?;
 
-        let leaf = Self::leaf_page(ctx.read_set.last().expect("cannot be empty").data());
+        let mut leaf_guard = ctx.write_set.pop().expect("cannot be empty");
+        let mut leaf = Self::leaf_page_mut(leaf_guard.data_mut());
         let insert_pos = leaf.find_insert_pos(&key, &value, self.comparator);
 
-        // If the key-value pair exists and is tombstoned, then this will be a safe insert
-        let is_tombstoned = insert_pos < leaf.curr_size()
+        // See if key-value already exists in tree
+        if insert_pos < leaf.curr_size()
             && leaf
                 .cmp_key_rid_to_idx(&key, &value, insert_pos, self.comparator)
                 .is_eq()
-            && leaf.is_idx_tombstoned(insert_pos);
-        let insert_safe = is_tombstoned || leaf.is_insert_safe();
+        {
+            if leaf.is_idx_tombstoned(insert_pos) {
+                leaf.remove_tombstone_at(insert_pos);
+                return Ok(());
+            } else {
+                return Err(BTreeError::Duplicate);
+            }
+        }
 
-        // At this point, we have all the information we need, give up all read latches.
-        // Now, we either know a fact that insertion is not 'safe', then we immediately
-        // delegate to pessimistic insertion. Otherwise, we try to get a write latch on
-        // the leaf. Then we see if things are still OK for us to proceed with our
-        // optimistic write, if things look off, then we fall back to pessimistic insert.
-        ctx.release_read_path();
-
-        if !insert_safe {
+        if !leaf.is_insert_safe() {
+            drop(leaf_guard);
+            ctx.release_read_path();
             return self.insert_pessimistic(key, value);
         }
 
-        todo!("finish the rest of logic and pessimistic insert");
+        leaf.insert_at(insert_pos, &key, &value);
 
         Ok(())
     }
@@ -233,11 +243,49 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         todo!()
     }
 
+    // Crab latching until we reach the leaf page in which we should insert the key-value
+    // Optimistically grab read latches along the way and get the write latch for the target
+    // leaf page.
     fn descend_read_path_for_insert(
         &self,
-        ctx: &mut BTreeContext,
+        ctx: &mut BTreeContext<'a>,
         key: K,
+        value: Rid,
     ) -> Result<(), BTreeError> {
-        todo!()
+        if BTreeNodeHeader::from_data(ctx.read_set.last().unwrap().data()).is_leaf() {
+            let leaf_page_id = ctx.read_set.last().unwrap().page_id();
+            ctx.read_set.pop();
+            ctx.write_set.push(self.bpm.write_page(leaf_page_id)?);
+            return Ok(());
+        }
+
+        // TODO: not very efficient to get the read latch on the leaf page
+        // only to immediately swap it for a write latch. It would be smarter
+        // to use the height of the BTree to anticipate whether or not the next
+        // page is a leaf and immediately get a write latch for it.
+        loop {
+            let internal = Self::internal_page(ctx.read_set.last().unwrap().data());
+            let next_page_id = *internal.value_at(internal.find_child_idx_for_insert(
+                &key,
+                &value,
+                self.comparator,
+            ));
+            let next_guard = self.bpm.read_page(next_page_id)?;
+            let next_page = BTreeNodeHeader::from_data(next_guard.data());
+
+            if next_page.is_leaf() {
+                // Drop so can get the writer latch instead
+                drop(next_guard);
+                ctx.write_set.push(self.bpm.write_page(next_page_id)?);
+                return Ok(());
+            }
+
+            let insert_is_safe = next_page.is_insert_safe();
+            ctx.read_set.push(next_guard);
+
+            if insert_is_safe {
+                ctx.release_read_ancestors();
+            }
+        }
     }
 }
