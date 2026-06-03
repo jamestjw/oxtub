@@ -197,6 +197,10 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageView<'a, K, TOMB_CAP> {
         // to ensure that even after adding one entry, the size is still < maxSize
         self.curr_size() + 1 < self.max_size()
     }
+
+    fn min_size(&self) -> usize {
+        self.max_size() / 2
+    }
 }
 
 impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
@@ -348,13 +352,21 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         BTreeLeafPageView::<K, TOMB_CAP>::entry_offset(idx)
     }
 
-    fn key_ref(&self, idx: usize) -> &K {
+    pub fn get_next_page_id(&self) -> PageId {
+        self.view().get_next_page_id()
+    }
+
+    pub fn min_size(&self) -> usize {
+        self.view().min_size()
+    }
+
+    pub fn key_ref(&self, idx: usize) -> &K {
         let start = Self::entry_offset(idx);
         let end = start + size_of::<K>();
         bytemuck::from_bytes(&self.data[start..end])
     }
 
-    fn rid_ref(&self, idx: usize) -> &Rid {
+    pub fn rid_ref(&self, idx: usize) -> &Rid {
         let start = Self::entry_offset(idx) + BTreeLeafPageView::<K, TOMB_CAP>::ENTRY_RID_OFFSET;
         let end = start + size_of::<Rid>();
         bytemuck::from_bytes(&self.data[start..end])

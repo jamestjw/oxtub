@@ -24,7 +24,7 @@ use crate::{
 
 // We refer to it as a BTree for short, but in reality it's a B+ Tree
 struct BTreeContext<'a> {
-    header_page: Option<WritePageGuard<'a>>,
+    header: Option<WritePageGuard<'a>>,
     root_page_id: PageId,
     write_set: Vec<WritePageGuard<'a>>,
     read_set: Vec<ReadPageGuard<'a>>,
@@ -33,7 +33,7 @@ struct BTreeContext<'a> {
 impl<'a> BTreeContext<'a> {
     pub fn new() -> Self {
         Self {
-            header_page: None,
+            header: None,
             root_page_id: INVALID_PAGE_ID,
             write_set: vec![],
             read_set: vec![],
@@ -47,7 +47,7 @@ impl<'a> BTreeContext<'a> {
     pub fn release_all(&mut self) {
         self.read_set.clear();
         self.write_set.clear();
-        self.header_page.take();
+        self.header.take();
     }
 
     pub fn release_read_ancestors(&mut self) {
@@ -56,7 +56,7 @@ impl<'a> BTreeContext<'a> {
         if let Some(current) = current {
             self.read_set.push(current);
         }
-        self.header_page.take();
+        self.header.take();
     }
 
     pub fn release_write_ancestors(&mut self) {
@@ -65,7 +65,7 @@ impl<'a> BTreeContext<'a> {
         if let Some(current) = current {
             self.write_set.push(current);
         }
-        self.header_page.take();
+        self.header.take();
     }
 
     pub fn release_read_path(&mut self) {
@@ -109,6 +109,10 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         self.get_read_guard(self.header_page_id)
     }
 
+    fn header_guard_mut(&self) -> Result<WritePageGuard<'_>, BTreeError> {
+        self.get_write_guard(self.header_page_id)
+    }
+
     fn get_read_guard(&self, page_id: PageId) -> Result<ReadPageGuard<'_>, BTreeError> {
         Ok(self.bpm.read_page(page_id)?)
     }
@@ -127,6 +131,10 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
 
     fn leaf_page_mut<'page>(data: &'page mut PageBytes) -> BTreeLeafPageMut<'page, K, TOMB_CAP> {
         BTreeLeafPageMut::from_data(data)
+    }
+
+    fn init_leaf_page<'page>(data: &'page mut PageBytes) -> BTreeLeafPageMut<'page, K, TOMB_CAP> {
+        BTreeLeafPageMut::init(data)
     }
 
     pub fn is_empty(&self) -> Result<bool, BTreeError> {
@@ -240,7 +248,68 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
     }
 
     fn insert_pessimistic(&self, key: K, value: Rid) -> Result<(), BTreeError> {
-        todo!()
+        let mut ctx = BTreeContext::new();
+        let mut header_guard = self.header_guard_mut()?;
+        // ctx.header = Some(self.header_guard_mut()?);
+        let mut header_page = BTreeRootPageMut::from_data(header_guard.data_mut());
+
+        if header_page.root_page_id() == INVALID_PAGE_ID {
+            let new_page_id = self.bpm.new_page();
+            header_page.set_root_page_id(new_page_id);
+
+            // Could populate the context but it's kind of useless
+            let mut new_root_guard = self.bpm.write_page(new_page_id)?;
+            let mut new_root = Self::init_leaf_page(new_root_guard.data_mut());
+            new_root.insert_at(0, &key, &value);
+
+            return Ok(());
+        }
+
+        ctx.root_page_id = header_page.root_page_id();
+        ctx.header = Some(header_guard);
+        ctx.write_set.push(self.bpm.write_page(ctx.root_page_id)?);
+
+        self.descend_write_path_for_insert(&mut ctx, key, value)?;
+
+        let mut leaf_page = Self::leaf_page_mut(ctx.write_set.last_mut().unwrap().data_mut());
+        let insert_idx = leaf_page.find_insert_pos(&key, &value, self.comparator);
+
+        // key value already exists
+        if insert_idx < leaf_page.curr_size()
+            && leaf_page
+                .cmp_key_rid_to_idx(&key, &value, insert_idx, self.comparator)
+                .is_eq()
+        {
+            if leaf_page.is_idx_tombstoned(insert_idx) {
+                leaf_page.remove_tombstone_at(insert_idx);
+                return Ok(());
+            }
+
+            // Should not happen as RID's are unique, we wouldn't try to insert
+            // it twice to an index
+            return Err(BTreeError::Duplicate);
+        }
+
+        leaf_page.insert_at(insert_idx, &key, &value);
+
+        // We don't want until we are full to split, immediately split when we
+        // hit max capacity to simplify logic
+        if leaf_page.curr_size() == leaf_page.max_size() {
+            let sibling_page_id = self.bpm.new_page();
+            let mut sibling_guard = self.bpm.write_page(sibling_page_id)?;
+            let mut sibling_leaf = Self::init_leaf_page(sibling_guard.data_mut());
+            sibling_leaf.set_next_page_id(leaf_page.get_next_page_id());
+
+            let split_idx = leaf_page.min_size();
+            leaf_page.move_split_entries_to(&mut sibling_leaf, split_idx);
+            leaf_page.set_next_page_id(sibling_page_id);
+
+            let separator_key = *sibling_leaf.key_ref(0);
+            let separator_rid = *sibling_leaf.rid_ref(0);
+            self.insert_into_parent(&mut ctx, &separator_key, &separator_rid, sibling_page_id);
+        }
+
+        Ok(())
     }
 
     // Crab latching until we reach the leaf page in which we should insert the key-value
@@ -287,5 +356,24 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
                 ctx.release_read_ancestors();
             }
         }
+    }
+
+    fn descend_write_path_for_insert(
+        &self,
+        ctx: &mut BTreeContext<'a>,
+        key: K,
+        value: Rid,
+    ) -> Result<(), BTreeError> {
+        todo!()
+    }
+
+    fn insert_into_parent(
+        &self,
+        ctx: &mut BTreeContext,
+        split_key: &K,
+        split_value: &Rid,
+        right_sibling_id: PageId,
+    ) -> Result<(), BTreeError> {
+        todo!()
     }
 }
