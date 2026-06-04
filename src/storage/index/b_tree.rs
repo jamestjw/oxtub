@@ -13,7 +13,7 @@ use crate::{
             error::BTreeError,
         },
         page::{
-            b_tree_internal_page::BTreeInternalPage,
+            b_tree_internal_page::{BTreeInternalPage, BTreeInternalPageMut},
             b_tree_leaf_page::{BTreeLeafPage, BTreeLeafPageMut},
             b_tree_node_header::BTreeNodeHeader,
             b_tree_root_page::{BTreeRootPage, BTreeRootPageMut},
@@ -123,6 +123,14 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
 
     fn internal_page<'page>(data: &'page PageBytes) -> BTreeInternalPage<'page, K> {
         BTreeInternalPage::from_data(data)
+    }
+
+    fn internal_page_mut<'page>(data: &'page mut PageBytes) -> BTreeInternalPageMut<'page, K> {
+        BTreeInternalPageMut::from_data(data)
+    }
+
+    fn init_internal_page<'page>(data: &'page mut PageBytes) -> BTreeInternalPageMut<'page, K> {
+        BTreeInternalPageMut::init(data)
     }
 
     fn leaf_page<'page>(data: &'page PageBytes) -> BTreeLeafPage<'page, K, TOMB_CAP> {
@@ -306,7 +314,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
 
             let separator_key = *sibling_leaf.key_ref(0);
             let separator_rid = *sibling_leaf.rid_ref(0);
-            self.insert_into_parent(&mut ctx, &separator_key, &separator_rid, sibling_page_id);
+            self.insert_into_parent(&mut ctx, &separator_key, &separator_rid, sibling_page_id)?;
         }
 
         Ok(())
@@ -374,6 +382,70 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         split_value: &Rid,
         right_sibling_id: PageId,
     ) -> Result<(), BTreeError> {
-        todo!()
+        let mut key_to_insert = *split_key;
+        let mut rid_to_insert = *split_value;
+        let mut new_right_child_id = right_sibling_id;
+
+        loop {
+            let left_child_id = { ctx.write_set.pop().unwrap().page_id() };
+
+            // Any retained safe ancestor would have absorbed the split before propagation
+            // reached this point, so an empty write set means the split child was the root.
+            if (ctx.write_set.is_empty()) {
+                // If the left sibling itself is the root, then we create a new root that will
+                // have the left and right siblings as children
+                assert!(ctx.is_root(left_child_id));
+                let new_root_page_id = self.bpm.new_page();
+                let mut new_root_guard = self.bpm.write_page(new_root_page_id)?;
+                let mut new_root = Self::init_internal_page(new_root_guard.data_mut());
+                new_root.set_value_at(0, left_child_id);
+                new_root.set_index_key_at(1, &key_to_insert, &rid_to_insert);
+                new_root.set_value_at(1, new_right_child_id);
+                new_root.set_size(2);
+
+                let mut header_page =
+                    BTreeRootPageMut::from_data(ctx.header.as_mut().unwrap().data_mut());
+                header_page.set_root_page_id(new_root_page_id);
+                ctx.root_page_id = new_root_page_id;
+
+                return Ok(());
+            }
+
+            let mut parent = Self::internal_page_mut(ctx.write_set.last_mut().unwrap().data_mut());
+
+            // Parent has room, just insert new child and we are done
+            if parent.curr_size() < parent.max_size() {
+                parent.insert_after(
+                    &left_child_id,
+                    key_to_insert,
+                    rid_to_insert,
+                    new_right_child_id,
+                );
+                return Ok(());
+            }
+
+            // Parent has no room, so we need to split the parent
+            let parent_sibling_page_id = self.bpm.new_page();
+            let mut parent_sibling_guard = self.bpm.write_page(parent_sibling_page_id)?;
+            let mut parent_sibling = Self::init_internal_page(parent_sibling_guard.data_mut());
+            let promoted_key = parent.split_to(&mut parent_sibling);
+            // Identify where the left_child was assigned to so we can send the right child there
+            // too
+            let mut target_parent = match parent.value_idx(&left_child_id) {
+                None => parent_sibling,
+                _ => parent,
+            };
+            target_parent.insert_after(
+                &left_child_id,
+                key_to_insert,
+                rid_to_insert,
+                new_right_child_id,
+            );
+
+            // Keep looping, with the parent as the 'left sibling' (last element in the write set),
+            // and it's new sibling which we explicitly pass as `new_right_child_id`
+            (key_to_insert, rid_to_insert) = promoted_key;
+            new_right_child_id = parent_sibling_page_id;
+        }
     }
 }

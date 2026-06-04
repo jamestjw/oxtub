@@ -277,7 +277,7 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
         self.header().max_size as usize
     }
 
-    fn curr_size(&self) -> usize {
+    pub fn curr_size(&self) -> usize {
         self.header().current_size as usize
     }
 
@@ -424,14 +424,18 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
             recipient_size += 1;
         }
 
-        recipient.header_mut().set_size(recipient_size);
-        self.header_mut().set_size(split_idx);
+        recipient.set_size(recipient_size);
+        self.set_size(split_idx);
 
         (promoted_key, promoted_rid)
     }
 
     pub fn min_size(&self) -> usize {
         (self.max_size() + 1) / 2
+    }
+
+    pub fn set_size(&mut self, size: usize) {
+        self.header_mut().set_size(size);
     }
 }
 
@@ -458,13 +462,6 @@ mod tests {
         fn compare(&self, a: &u64, b: &u64) -> Ordering {
             a.cmp(b)
         }
-    }
-
-    fn set_size<const PAGE_SIZE: usize>(
-        page: &mut BTreeInternalPageMut<'_, u64, PAGE_SIZE>,
-        size: usize,
-    ) {
-        page.header_mut().current_size = size as u16;
     }
 
     fn draw_internal_page<const PAGE_SIZE: usize>(
@@ -505,7 +502,7 @@ mod tests {
         let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
         let comparator = U64Comparator;
 
-        set_size(&mut page, 1);
+        page.set_size(1);
         page.set_value_at(0, 100);
 
         assert_eq!(page.find_child_idx(&0, &comparator), 0);
@@ -520,7 +517,7 @@ mod tests {
         let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
         let comparator = U64Comparator;
 
-        set_size(&mut page, 4);
+        page.set_size(4);
         for idx in 0..4 {
             page.set_value_at(idx, 100 + idx as PageId);
         }
@@ -542,7 +539,7 @@ mod tests {
         let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
         let comparator = U64Comparator;
 
-        set_size(&mut page, 4);
+        page.set_size(4);
         page.set_index_key_at(1, &10, &Rid::new(1, 1));
         page.set_index_key_at(2, &20, &Rid::new(2, 1));
         page.set_index_key_at(3, &30, &Rid::new(3, 1));
@@ -579,7 +576,7 @@ mod tests {
         let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
         let comparator = U64Comparator;
 
-        set_size(&mut page, 4);
+        page.set_size(4);
         page.set_index_key_at(1, &10, &Rid::new(1, 1));
         page.set_index_key_at(2, &20, &Rid::new(2, 1));
         page.set_index_key_at(3, &30, &Rid::new(3, 1));
@@ -601,7 +598,7 @@ mod tests {
 
         {
             let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
-            set_size(&mut page, 4);
+            page.set_size(4);
             page.set_value_at(0, 100);
             page.set_index_key_at(1, &10, &Rid::new(1, 1));
             page.set_value_at(1, 101);
@@ -628,7 +625,7 @@ mod tests {
         let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
         let comparator = U64Comparator;
 
-        set_size(&mut page, 6);
+        page.set_size(6);
         page.set_index_key_at(1, &10, &Rid::new(1, 1));
         page.set_index_key_at(2, &20, &Rid::new(2, 1));
         page.set_index_key_at(3, &20, &Rid::new(2, 2));
@@ -650,7 +647,7 @@ mod tests {
         let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
         let comparator = U64Comparator;
 
-        set_size(&mut page, 6);
+        page.set_size(6);
         page.set_index_key_at(1, &10, &Rid::new(1, 1));
         page.set_index_key_at(2, &20, &Rid::new(2, 1));
         page.set_index_key_at(3, &20, &Rid::new(2, 2));
@@ -688,7 +685,7 @@ mod tests {
         let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
         let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
 
-        set_size(&mut page, 3);
+        page.set_size(3);
         page.set_value_at(0, 100);
         page.set_index_key_at(1, &20, &Rid::new(2, 1));
         page.set_value_at(1, 102);
@@ -746,7 +743,7 @@ slot 5: key=(40, rid=4:1), value=104
         let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
         let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
 
-        set_size(&mut page, 1);
+        page.set_size(1);
         page.set_value_at(0, 100);
 
         page.insert_after(&999, 10, Rid::new(1, 1), 101);
@@ -759,7 +756,7 @@ slot 5: key=(40, rid=4:1), value=104
         let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
 
         let max_size = page.max_size();
-        set_size(&mut page, max_size);
+        page.set_size(max_size);
         page.set_value_at(0, 100);
         for idx in 1..max_size {
             page.set_index_key_at(idx, &(idx as u64 * 10), &Rid::new(idx as u32, 1));
@@ -779,7 +776,7 @@ slot 5: key=(40, rid=4:1), value=104
         let max_size = source.max_size();
         assert_eq!(max_size, 6);
 
-        set_size(&mut source, max_size);
+        source.set_size(max_size);
         source.set_value_at(0, 100);
         for idx in 1..max_size {
             source.set_value_at(idx, 100 + idx as PageId);
@@ -824,7 +821,7 @@ slot 2: key=(50, rid=5:1), value=105
         let mut data = TestPageData([0; DEFAULT_PAGE_SIZE]);
         let mut page = BTreeInternalPageMut::<u64>::init(&mut data.0);
 
-        set_size(&mut page, 6);
+        page.set_size(6);
         page.set_value_at(0, 100);
         for idx in 1..6 {
             page.set_index_key_at(idx, &(idx as u64 * 10), &Rid::new(idx as u32, 1));
