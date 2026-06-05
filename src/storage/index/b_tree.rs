@@ -450,14 +450,8 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
             let parent_sibling_page_id = self.bpm.new_page();
             let mut parent_sibling_guard = self.bpm.write_page(parent_sibling_page_id)?;
             let mut parent_sibling = Self::init_internal_page(parent_sibling_guard.data_mut());
-            let promoted_key = parent.split_to(&mut parent_sibling);
-            // Identify where the left_child was assigned to so we can send the right child there
-            // too
-            let mut target_parent = match parent.value_idx(&left_child_id) {
-                None => parent_sibling,
-                _ => parent,
-            };
-            target_parent.insert_after(
+            let promoted_key = parent.split_insert_after(
+                &mut parent_sibling,
                 &left_child_id,
                 key_to_insert,
                 rid_to_insert,
