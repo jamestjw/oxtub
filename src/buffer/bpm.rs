@@ -3,6 +3,9 @@ use std::{
     sync::{Mutex, RwLockWriteGuard},
 };
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::{
     buffer::{
         frame::{Frame, FrameMeta},
@@ -22,6 +25,12 @@ use crate::{
 pub struct BufferPoolManager {
     // TODO: see if this needs to be Arc
     inner: BufferPoolInner,
+
+    // Track read and write stats for testing purposes
+    #[cfg(test)]
+    read_count: AtomicUsize,
+    #[cfg(test)]
+    write_count: AtomicUsize,
 }
 
 pub struct BufferPoolInner {
@@ -69,7 +78,21 @@ impl BufferPoolManager {
                 frames,
                 disk_scheduler: DiskScheduler::new(disk_manager),
             },
+            #[cfg(test)]
+            read_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            write_count: AtomicUsize::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub fn read_count(&self) -> usize {
+        self.read_count.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn write_count(&self) -> usize {
+        self.write_count.load(Ordering::Relaxed)
     }
 
     // Number of frames managed by the BPM
@@ -148,6 +171,9 @@ impl BufferPoolManager {
      *   algorithm, then we load the page into the now free frame and return a guard for it.
      */
     pub fn write_page(&self, page_id: PageId) -> Result<WritePageGuard<'_>, BufferPoolError> {
+        #[cfg(test)]
+        self.write_count.fetch_add(1, Ordering::Relaxed);
+
         let mut state = self.inner.state.lock().unwrap();
 
         // Try to get a frame that we have already loaded the page into
@@ -191,6 +217,9 @@ impl BufferPoolManager {
     }
 
     pub fn read_page(&self, page_id: PageId) -> Result<ReadPageGuard<'_>, BufferPoolError> {
+        #[cfg(test)]
+        self.read_count.fetch_add(1, Ordering::Relaxed);
+
         let mut state = self.inner.state.lock().unwrap();
 
         // Try to get a frame that we have already loaded the page into

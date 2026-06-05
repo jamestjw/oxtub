@@ -217,6 +217,10 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPage<'a, K, PAGE
         self.view.max_size()
     }
 
+    pub fn curr_size(&self) -> usize {
+        self.view.curr_size()
+    }
+
     pub fn key_at(&self, idx: usize) -> &K {
         self.view.key_at(idx)
     }

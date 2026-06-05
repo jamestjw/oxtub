@@ -465,3 +465,180 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{cmp::Ordering, path::PathBuf};
+
+    use tempfile::NamedTempFile;
+
+    use super::*;
+    use crate::storage::disk::disk_manager::DiskManager;
+
+    struct U64Comparator;
+
+    impl KeyComparator<u64> for U64Comparator {
+        fn compare(&self, a: &u64, b: &u64) -> Ordering {
+            a.cmp(b)
+        }
+    }
+
+    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(PathBuf::from(file.path())).unwrap();
+        BufferPoolManager::new(pool_size, disk_manager)
+    }
+
+    fn rid_for_key(key: u64) -> Rid {
+        Rid::new(
+            (key / (u16::MAX as u64 + 1)) as PageId,
+            (key & 0xffff) as usize,
+        )
+    }
+
+    fn root_page_id(bpm: &BufferPoolManager, header_page_id: PageId) -> PageId {
+        let header_guard = bpm.read_page(header_page_id).unwrap();
+        BTreeRootPage::from_data(header_guard.data()).root_page_id()
+    }
+
+    fn find_insert_safe_leaf_key<const TOMB_CAP: usize>(
+        bpm: &BufferPoolManager,
+        root_page_id: PageId,
+    ) -> Option<u64> {
+        let mut current_page_id = root_page_id;
+
+        loop {
+            let current_guard = bpm.read_page(current_page_id).unwrap();
+            if BTreeNodeHeader::from_data(current_guard.data()).is_leaf() {
+                break;
+            }
+
+            let internal_page = BTreeInternalPage::<u64>::from_data(current_guard.data());
+            current_page_id = *internal_page.value_at(0);
+        }
+
+        loop {
+            let leaf_guard = bpm.read_page(current_page_id).unwrap();
+            let leaf = BTreeLeafPage::<u64, TOMB_CAP>::from_data(leaf_guard.data());
+
+            if leaf.curr_size() > 0 && leaf.curr_size() + 1 < leaf.max_size() {
+                return Some(*leaf.key_at(0) + 1);
+            }
+
+            let next_page_id = leaf.get_next_page_id();
+            if next_page_id == INVALID_PAGE_ID {
+                return None;
+            }
+
+            current_page_id = next_page_id;
+        }
+    }
+
+    #[test]
+    fn basic_insert_test() {
+        const TOMB_CAP: usize = 3;
+
+        let bpm = setup_bpm(50);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        let key = 42;
+        let rid = rid_for_key(key);
+        tree.insert(key, rid).unwrap();
+
+        let root_page_id = root_page_id(&bpm, header_page_id);
+        let root_guard = bpm.read_page(root_page_id).unwrap();
+        assert!(BTreeNodeHeader::from_data(root_guard.data()).is_leaf());
+
+        let root_as_leaf = BTreeLeafPage::<u64, TOMB_CAP>::from_data(root_guard.data());
+        assert_eq!(root_as_leaf.curr_size(), 1);
+        assert_eq!(*root_as_leaf.key_at(0), key);
+        assert_eq!(tree.get_values(&key).unwrap(), vec![rid]);
+    }
+
+    #[test]
+    fn insert_test_1_no_iterator() {
+        const TOMB_CAP: usize = 3;
+
+        let bpm = setup_bpm(50);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        let keys = [1, 2, 3, 4, 5];
+        for key in keys {
+            tree.insert(key, rid_for_key(key)).unwrap();
+        }
+
+        for key in keys {
+            let rids = tree.get_values(&key).unwrap();
+            assert_eq!(rids, vec![rid_for_key(key)]);
+        }
+    }
+
+    #[test]
+    fn optimistic_insert_test() {
+        const TOMB_CAP: usize = 3;
+
+        let bpm = setup_bpm(100);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        let num_keys = BTreeLeafPageMut::<u64, TOMB_CAP>::MAX_SIZE * 2;
+        for i in 0..num_keys {
+            let key = 2 * i as u64;
+            tree.insert(key, rid_for_key(key)).unwrap();
+        }
+
+        let root_page_id = root_page_id(&bpm, header_page_id);
+        let to_insert = find_insert_safe_leaf_key::<TOMB_CAP>(&bpm, root_page_id)
+            .expect("expected an insert-safe leaf");
+        assert!(tree.get_values(&to_insert).unwrap().is_empty());
+
+        let base_reads = bpm.read_count();
+        let base_writes = bpm.write_count();
+
+        let rid = rid_for_key(to_insert);
+        tree.insert(to_insert, rid).unwrap();
+
+        assert!(bpm.read_count() - base_reads > 0);
+        assert_eq!(bpm.write_count() - base_writes, 1);
+        assert_eq!(tree.get_values(&to_insert).unwrap(), vec![rid]);
+    }
+
+    #[test]
+    fn out_of_order_insert_stress_creates_multiple_levels() {
+        const TOMB_CAP: usize = 3;
+        const NUM_KEYS: u64 = 220_000;
+        const MULTIPLIER: u64 = 37_211;
+
+        let bpm = setup_bpm(1_000);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        for i in 0..NUM_KEYS {
+            let key = (i * MULTIPLIER) % NUM_KEYS;
+            tree.insert(key, rid_for_key(key)).unwrap();
+        }
+
+        let root_page_id = root_page_id(&bpm, header_page_id);
+        let root_guard = bpm.read_page(root_page_id).unwrap();
+        assert!(!BTreeNodeHeader::from_data(root_guard.data()).is_leaf());
+
+        let root = BTreeInternalPage::<u64>::from_data(root_guard.data());
+        let first_child_guard = bpm.read_page(*root.value_at(0)).unwrap();
+        assert!(
+            !BTreeNodeHeader::from_data(first_child_guard.data()).is_leaf(),
+            "root child was still a leaf; root_size={}, root_max_size={}",
+            root.curr_size(),
+            root.max_size()
+        );
+
+        for key in 0..NUM_KEYS {
+            assert_eq!(tree.get_values(&key).unwrap(), vec![rid_for_key(key)]);
+        }
+    }
+}
