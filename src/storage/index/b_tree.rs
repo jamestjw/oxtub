@@ -60,12 +60,12 @@ impl<'a> BTreeContext<'a> {
     }
 
     pub fn release_write_ancestors(&mut self) {
+        self.header.take();
         let current = self.write_set.pop();
         self.write_set.clear();
         if let Some(current) = current {
             self.write_set.push(current);
         }
-        self.header.take();
     }
 
     pub fn release_read_path(&mut self) {
@@ -372,7 +372,29 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         key: K,
         value: Rid,
     ) -> Result<(), BTreeError> {
-        todo!()
+        loop {
+            let last_guard = ctx.write_set.last().unwrap();
+
+            if BTreeNodeHeader::from_data(last_guard.data()).is_leaf() {
+                return Ok(());
+            }
+
+            let internal_page = Self::internal_page(last_guard.data());
+            let child_page_id = internal_page.value_at(internal_page.find_child_idx_for_insert(
+                &key,
+                &value,
+                self.comparator,
+            ));
+            let child_guard = self.bpm.write_page(*child_page_id)?;
+            let child_page = BTreeNodeHeader::from_data(child_guard.data());
+
+            if child_page.is_insert_safe() {
+                ctx.write_set.push(child_guard);
+                ctx.release_write_ancestors();
+            } else {
+                ctx.write_set.push(child_guard);
+            }
+        }
     }
 
     fn insert_into_parent(
