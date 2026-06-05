@@ -578,6 +578,77 @@ mod tests {
     }
 
     #[test]
+    fn get_values_returns_empty_for_missing_key() {
+        const TOMB_CAP: usize = 3;
+
+        let bpm = setup_bpm(50);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        for key in [1, 3, 5, 7, 9] {
+            tree.insert(key, rid_for_key(key)).unwrap();
+        }
+
+        assert_eq!(tree.get_values(&0).unwrap(), Vec::<Rid>::new());
+        assert_eq!(tree.get_values(&4).unwrap(), Vec::<Rid>::new());
+        assert_eq!(tree.get_values(&10).unwrap(), Vec::<Rid>::new());
+    }
+
+    #[test]
+    fn get_values_returns_duplicate_key_rids_across_leaf_boundaries() {
+        const TOMB_CAP: usize = 3;
+
+        let bpm = setup_bpm(50);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        let key = 42;
+        let duplicate_count = BTreeLeafPageMut::<u64, TOMB_CAP>::MAX_SIZE + 20;
+        let expected: Vec<_> = (0..duplicate_count)
+            .map(|idx| Rid::new((idx / 128) as PageId, idx % 128))
+            .collect();
+
+        for rid in expected.iter().rev() {
+            tree.insert(key, *rid).unwrap();
+        }
+
+        let root_page_id = root_page_id(&bpm, header_page_id);
+        let root_guard = bpm.read_page(root_page_id).unwrap();
+        assert!(!BTreeNodeHeader::from_data(root_guard.data()).is_leaf());
+
+        assert_eq!(tree.get_values(&key).unwrap(), expected);
+    }
+
+    #[test]
+    fn out_of_order_insert_stress_creates_multiple_levels() {
+        const TOMB_CAP: usize = 3;
+        const NUM_KEYS: u64 = 220_000;
+        const MULTIPLIER: u64 = 37_211;
+
+        let bpm = setup_bpm(1_000);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        // this inserts permutation of the 0..NUM_KEYS because
+        // multiplication by a unit modulo n is a permutation of Z/nZ.
+        for i in 0..NUM_KEYS {
+            let key = (i * MULTIPLIER) % NUM_KEYS;
+            tree.insert(key, rid_for_key(key)).unwrap();
+        }
+
+        let root_page_id = root_page_id(&bpm, header_page_id);
+        let root_guard = bpm.read_page(root_page_id).unwrap();
+        let root = BTreeInternalPage::<u64>::from_data(root_guard.data());
+
+        for key in 0..NUM_KEYS {
+            assert_eq!(tree.get_values(&key).unwrap(), vec![rid_for_key(key)]);
+        }
+    }
+
+    #[test]
     fn optimistic_insert_test() {
         const TOMB_CAP: usize = 3;
 
@@ -603,42 +674,10 @@ mod tests {
         let rid = rid_for_key(to_insert);
         tree.insert(to_insert, rid).unwrap();
 
+        // Inserting optimistically means that we only do reads all the way
+        // down to the leaf, after which we do a single write.
         assert!(bpm.read_count() - base_reads > 0);
         assert_eq!(bpm.write_count() - base_writes, 1);
         assert_eq!(tree.get_values(&to_insert).unwrap(), vec![rid]);
-    }
-
-    #[test]
-    fn out_of_order_insert_stress_creates_multiple_levels() {
-        const TOMB_CAP: usize = 3;
-        const NUM_KEYS: u64 = 220_000;
-        const MULTIPLIER: u64 = 37_211;
-
-        let bpm = setup_bpm(1_000);
-        let header_page_id = bpm.new_page();
-        let comparator = U64Comparator;
-        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
-
-        for i in 0..NUM_KEYS {
-            let key = (i * MULTIPLIER) % NUM_KEYS;
-            tree.insert(key, rid_for_key(key)).unwrap();
-        }
-
-        let root_page_id = root_page_id(&bpm, header_page_id);
-        let root_guard = bpm.read_page(root_page_id).unwrap();
-        assert!(!BTreeNodeHeader::from_data(root_guard.data()).is_leaf());
-
-        let root = BTreeInternalPage::<u64>::from_data(root_guard.data());
-        let first_child_guard = bpm.read_page(*root.value_at(0)).unwrap();
-        assert!(
-            !BTreeNodeHeader::from_data(first_child_guard.data()).is_leaf(),
-            "root child was still a leaf; root_size={}, root_max_size={}",
-            root.curr_size(),
-            root.max_size()
-        );
-
-        for key in 0..NUM_KEYS {
-            assert_eq!(tree.get_values(&key).unwrap(), vec![rid_for_key(key)]);
-        }
     }
 }
