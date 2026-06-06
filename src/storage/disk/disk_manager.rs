@@ -23,6 +23,7 @@ impl DiskManager {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&db_file)?;
 
         db_file_handle.set_len(((DEFAULT_DB_FILE_PAGE_CAPACITY + 1) * DEFAULT_PAGE_SIZE) as u64)?;
