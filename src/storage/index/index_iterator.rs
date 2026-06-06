@@ -14,10 +14,18 @@ pub struct IndexIterator<'a, K, const TOMB_CAP: usize> {
 
 impl<'a, K: bytemuck::Pod + Copy, const TOMB_CAP: usize> IndexIterator<'a, K, TOMB_CAP> {
     pub fn new(bpm: &'a BufferPoolManager, read_page_guard: Option<ReadPageGuard<'a>>) -> Self {
+        Self::new_at(bpm, read_page_guard, 0)
+    }
+
+    pub fn new_at(
+        bpm: &'a BufferPoolManager,
+        read_page_guard: Option<ReadPageGuard<'a>>,
+        idx: usize,
+    ) -> Self {
         Self {
             bpm,
             read_page_guard,
-            idx: 0,
+            idx,
             _marker: PhantomData,
         }
     }
@@ -30,9 +38,8 @@ impl<'a, K: bytemuck::Pod + Copy, const TOMB_CAP: usize> Iterator
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let curr_leaf = BTreeLeafPage::<K, TOMB_CAP>::from_data(
-                self.read_page_guard.as_ref()?.data(),
-            );
+            let curr_leaf =
+                BTreeLeafPage::<K, TOMB_CAP>::from_data(self.read_page_guard.as_ref()?.data());
 
             while self.idx < curr_leaf.curr_size() {
                 let idx = self.idx;

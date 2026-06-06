@@ -493,7 +493,37 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         IndexIterator::new(self.bpm, Some(curr_page_guard))
     }
 
-    // TODO: build iterator that searches for a key
+    pub fn lower_bound(&self, key: &K) -> IndexIterator<'_, K, TOMB_CAP> {
+        let mut curr_page_guard = {
+            let header_guard = self.header_guard().unwrap();
+            let header_page = BTreeRootPage::from_data(header_guard.data());
+            let curr_page_id = header_page.root_page_id();
+
+            if curr_page_id == INVALID_PAGE_ID {
+                return IndexIterator::new(self.bpm, None);
+            }
+            self.bpm.read_page(curr_page_id).unwrap()
+        };
+
+        while !BTreeNodeHeader::from_data(curr_page_guard.data()).is_leaf() {
+            let curr_internal_page = Self::internal_page(curr_page_guard.data());
+            assert!(
+                curr_internal_page.curr_size() > 0,
+                "empty internal page is invalid"
+            );
+
+            let child_page_id = curr_internal_page
+                .value_at(curr_internal_page.find_child_idx(key, self.comparator));
+            curr_page_guard = self.bpm.read_page(*child_page_id).unwrap();
+        }
+
+        let idx = {
+            let leaf = Self::leaf_page(curr_page_guard.data());
+            leaf.find_pos(key, self.comparator)
+        };
+
+        IndexIterator::new_at(self.bpm, Some(curr_page_guard), idx)
+    }
 }
 
 #[cfg(test)]
@@ -696,6 +726,61 @@ mod tests {
 
         let scanned: Vec<_> = tree.iter().collect();
         let expected: Vec<_> = (0..NUM_KEYS).map(|key| (key, rid_for_key(key))).collect();
+
+        assert_eq!(scanned, expected);
+    }
+
+    #[test]
+    fn lower_bound_starts_at_first_key_not_less_than_search_key() {
+        const TOMB_CAP: usize = 3;
+        const NUM_KEYS: u64 = 1_000;
+        const MULTIPLIER: u64 = 37;
+
+        let bpm = setup_bpm(100);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        for i in 0..NUM_KEYS {
+            let key = ((i * MULTIPLIER) % NUM_KEYS) * 2 + 1;
+            tree.insert(key, rid_for_key(key)).unwrap();
+        }
+
+        let scanned: Vec<_> = tree.lower_bound(&500).take(5).collect();
+        let expected: Vec<_> = [501, 503, 505, 507, 509]
+            .into_iter()
+            .map(|key| (key, rid_for_key(key)))
+            .collect();
+        assert_eq!(scanned, expected);
+
+        assert_eq!(tree.lower_bound(&0).next(), Some((1, rid_for_key(1))));
+        assert_eq!(tree.lower_bound(&(NUM_KEYS * 2 + 1)).next(), None);
+    }
+
+    #[test]
+    fn lower_bound_finds_first_duplicate_across_leaf_boundaries() {
+        const TOMB_CAP: usize = 3;
+
+        let bpm = setup_bpm(50);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        let key = 42;
+        let duplicate_count = BTreeLeafPageMut::<u64, TOMB_CAP>::MAX_SIZE + 20;
+        let expected_rids: Vec<_> = (0..duplicate_count)
+            .map(|idx| Rid::new((idx / 128) as PageId, idx % 128))
+            .collect();
+
+        for rid in expected_rids.iter().rev() {
+            tree.insert(key, *rid).unwrap();
+        }
+
+        let scanned: Vec<_> = tree.lower_bound(&key).take(duplicate_count).collect();
+        let expected: Vec<_> = expected_rids
+            .into_iter()
+            .map(|rid| (key, rid))
+            .collect();
 
         assert_eq!(scanned, expected);
     }
