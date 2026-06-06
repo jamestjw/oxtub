@@ -488,7 +488,7 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
     }
 
     pub fn min_size(&self) -> usize {
-        (self.max_size() + 1) / 2
+        self.max_size().div_ceil(2)
     }
 
     pub fn set_size(&mut self, size: usize) {

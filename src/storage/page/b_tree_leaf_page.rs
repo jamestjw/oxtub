@@ -288,7 +288,7 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         let mut page = Self::from_data(data);
         let header = page.header_mut();
         header.common.init(PAGE_TYPE_LEAF, Self::MAX_SIZE);
-        header.next_page_id = INVALID_PAGE_ID as u32;
+        header.next_page_id = INVALID_PAGE_ID;
         header.num_tombstones = 0;
         header._reserved = 0;
 

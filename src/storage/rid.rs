@@ -14,7 +14,7 @@ impl Rid {
         assert!(slot_id <= u16::MAX as usize);
 
         Self {
-            page_id: page_id,
+            page_id,
             slot_id: slot_id as u16,
             _reserved: 0,
         }

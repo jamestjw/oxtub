@@ -29,13 +29,9 @@ impl<'a, K: bytemuck::Pod + Copy, const TOMB_CAP: usize> Iterator
     type Item = (K, Rid);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.read_page_guard.is_none() {
-            return None;
-        }
-
         loop {
             let curr_leaf = BTreeLeafPage::<K, TOMB_CAP>::from_data(
-                self.read_page_guard.as_ref().unwrap().data(),
+                self.read_page_guard.as_ref()?.data(),
             );
 
             while self.idx < curr_leaf.curr_size() {

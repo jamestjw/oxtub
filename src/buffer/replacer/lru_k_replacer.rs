@@ -58,7 +58,7 @@ impl LruKReplacer {
 
 impl Replacer for LruKReplacer {
     fn record_access(&mut self, frame_id: usize, _page_id: PageId) {
-        if !(frame_id < self.replacer_size) {
+        if frame_id >= self.replacer_size {
             panic!("invalid frame id {frame_id}");
         }
 
