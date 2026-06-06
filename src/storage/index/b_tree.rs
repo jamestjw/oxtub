@@ -11,6 +11,7 @@ use crate::{
         index::{
             comparator::{self, KeyComparator},
             error::BTreeError,
+            index_iterator::IndexIterator,
         },
         page::{
             b_tree_internal_page::{BTreeInternalPage, BTreeInternalPageMut},
@@ -464,6 +465,35 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
             new_right_child_id = parent_sibling_page_id;
         }
     }
+
+    // Iteration uses panicking semantics for buffer pool failures.
+    pub fn iter(&self) -> IndexIterator<'_, K, TOMB_CAP> {
+        let mut curr_page_guard = {
+            let header_guard = self.header_guard().unwrap();
+            let header_page = BTreeRootPage::from_data(header_guard.data());
+            let curr_page_id = header_page.root_page_id();
+
+            if curr_page_id == INVALID_PAGE_ID {
+                return IndexIterator::new(self.bpm, None);
+            }
+            self.bpm.read_page(curr_page_id).unwrap()
+        };
+
+        while !BTreeNodeHeader::from_data(curr_page_guard.data()).is_leaf() {
+            let curr_internal_page = Self::internal_page(curr_page_guard.data());
+            assert!(
+                curr_internal_page.curr_size() > 0,
+                "empty internal page is invalid"
+            );
+
+            let child_page_id = curr_internal_page.value_at(0);
+            curr_page_guard = self.bpm.read_page(*child_page_id).unwrap();
+        }
+
+        IndexIterator::new(self.bpm, Some(curr_page_guard))
+    }
+
+    // TODO: build iterator that searches for a key
 }
 
 #[cfg(test)]
@@ -646,6 +676,28 @@ mod tests {
         for key in 0..NUM_KEYS {
             assert_eq!(tree.get_values(&key).unwrap(), vec![rid_for_key(key)]);
         }
+    }
+
+    #[test]
+    fn iter_scans_out_of_order_in_key_order() {
+        const TOMB_CAP: usize = 3;
+        const NUM_KEYS: u64 = 1_000;
+        const MULTIPLIER: u64 = 37;
+
+        let bpm = setup_bpm(100);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        for i in 0..NUM_KEYS {
+            let key = (i * MULTIPLIER) % NUM_KEYS;
+            tree.insert(key, rid_for_key(key)).unwrap();
+        }
+
+        let scanned: Vec<_> = tree.iter().collect();
+        let expected: Vec<_> = (0..NUM_KEYS).map(|key| (key, rid_for_key(key))).collect();
+
+        assert_eq!(scanned, expected);
     }
 
     #[test]

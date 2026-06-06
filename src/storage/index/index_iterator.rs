@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use crate::{
     buffer::{bpm::BufferPoolManager, page::INVALID_PAGE_ID, page_guard::ReadPageGuard},
-    storage::{index::comparator::KeyComparator, page::b_tree_leaf_page::BTreeLeafPage, rid::Rid},
+    storage::{page::b_tree_leaf_page::BTreeLeafPage, rid::Rid},
 };
 
 pub struct IndexIterator<'a, K, const TOMB_CAP: usize> {
@@ -21,10 +21,6 @@ impl<'a, K: bytemuck::Pod + Copy, const TOMB_CAP: usize> IndexIterator<'a, K, TO
             _marker: PhantomData,
         }
     }
-
-    fn is_end(&self) -> bool {
-        self.read_page_guard.is_none()
-    }
 }
 
 impl<'a, K: bytemuck::Pod + Copy, const TOMB_CAP: usize> Iterator
@@ -36,9 +32,6 @@ impl<'a, K: bytemuck::Pod + Copy, const TOMB_CAP: usize> Iterator
         if self.read_page_guard.is_none() {
             return None;
         }
-
-        let curr_leaf =
-            BTreeLeafPage::<K, TOMB_CAP>::from_data(self.read_page_guard.as_ref().unwrap().data());
 
         loop {
             let curr_leaf = BTreeLeafPage::<K, TOMB_CAP>::from_data(
