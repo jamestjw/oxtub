@@ -12,4 +12,7 @@ pub enum BTreeError {
 
     #[error("key-value pair already exists")]
     Duplicate,
+
+    #[error("tuple does not exist")]
+    NotFound,
 }

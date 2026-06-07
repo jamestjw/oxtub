@@ -466,6 +466,71 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         }
     }
 
+    pub fn remove(&mut self, key: K, value: Rid) -> Result<(), BTreeError> {
+        let mut ctx = BTreeContext::new();
+
+        let header_guard = self.header_guard()?;
+        let header_page = BTreeRootPage::from_data(header_guard.data());
+        let root_page_id = header_page.root_page_id();
+
+        if root_page_id == INVALID_PAGE_ID {
+            return Err(BTreeError::NotFound);
+        }
+
+        ctx.root_page_id = root_page_id;
+        ctx.read_set.push(header_guard);
+        ctx.read_set.push(self.bpm.read_page(root_page_id)?);
+
+        self.descend_read_path_for_delete(&mut ctx, key)?;
+
+        let mut leaf_guard = ctx.write_set.pop().unwrap();
+        let leaf_page_id = leaf_guard.page_id();
+        let mut leaf = Self::leaf_page_mut(leaf_guard.data_mut());
+
+        // See if the leaf actually contains the key
+        let idx = leaf.find_insert_pos(&key, &value, self.comparator);
+        if idx >= leaf.curr_size()
+            || leaf
+                .cmp_key_rid_to_idx(&key, &value, idx, self.comparator)
+                .is_ne()
+        {
+            return Err(BTreeError::NotFound);
+        }
+
+        // Check if key has already been deleted
+        if leaf.is_idx_tombstoned(idx) {
+            return Err(BTreeError::NotFound);
+        }
+
+        let leaf_is_root = leaf_page_id == root_page_id;
+        let leaf_is_safe = self.is_leaf_delete_safe(&leaf, leaf_is_root);
+
+        if leaf_is_safe {
+            ctx.release_read_path();
+
+            if leaf.are_tombstones_full() {
+                // Must mean that we can just remove the key directly
+            }
+        }
+
+        todo!()
+    }
+
+    fn descend_read_path_for_delete(
+        &self,
+        ctx: &mut BTreeContext<'a>,
+        key: K,
+    ) -> Result<(), BTreeError> {
+        todo!()
+    }
+
+    fn is_leaf_delete_safe(&self, leaf: &BTreeLeafPageMut<'_, K, TOMB_CAP>, is_root: bool) -> bool {
+        // - Root leaf can have any number of keys, so deletion is always fine
+        // - If we have tombstone capacity, then delete must be safe
+        // - If we are above min size, we can lose one key without being underweight
+        is_root || !leaf.are_tombstones_full() || leaf.is_delete_safe()
+    }
+
     // Iteration uses panicking semantics for buffer pool failures.
     pub fn iter(&self) -> IndexIterator<'_, K, TOMB_CAP> {
         let mut curr_page_guard = {
@@ -777,10 +842,7 @@ mod tests {
         }
 
         let scanned: Vec<_> = tree.lower_bound(&key).take(duplicate_count).collect();
-        let expected: Vec<_> = expected_rids
-            .into_iter()
-            .map(|rid| (key, rid))
-            .collect();
+        let expected: Vec<_> = expected_rids.into_iter().map(|rid| (key, rid)).collect();
 
         assert_eq!(scanned, expected);
     }

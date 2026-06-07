@@ -40,6 +40,14 @@ impl From<TombstoneIndex> for usize {
     }
 }
 
+impl TryFrom<usize> for TombstoneIndex {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        Ok(Self(u16::try_from(value)?))
+    }
+}
+
 impl TombstoneIndex {
     pub fn incr(&mut self) {
         self.0 += 1;
@@ -82,6 +90,10 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageView<'a, K, TOMB_CAP> {
 
     fn get_tombstone_count(&self) -> usize {
         self.header().num_tombstones as usize
+    }
+
+    fn are_tombstones_full(&self) -> bool {
+        (self.header().num_tombstones as usize) == TOMB_CAP
     }
 
     fn get_next_page_id(&self) -> PageId {
@@ -198,6 +210,10 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageView<'a, K, TOMB_CAP> {
         self.curr_size() + 1 < self.max_size()
     }
 
+    fn is_delete_safe(&self) -> bool {
+        self.curr_size() > self.min_size()
+    }
+
     fn min_size(&self) -> usize {
         self.max_size() / 2
     }
@@ -232,6 +248,10 @@ impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
 
     pub fn get_tombstoned_keys(&self) -> Vec<K> {
         self.view.get_tombstoned_keys()
+    }
+
+    pub fn is_delete_safe(&self) -> bool {
+        self.view.is_delete_safe()
     }
 
     pub fn key_at(&self, idx: usize) -> &K {
@@ -269,6 +289,10 @@ impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
 
     pub fn is_insert_safe(&self) -> bool {
         self.view.is_insert_safe()
+    }
+
+    pub fn are_tombstones_full(&self) -> bool {
+        self.view.are_tombstones_full()
     }
 }
 
@@ -384,6 +408,14 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         self.header_mut().num_tombstones = size as u16;
     }
 
+    pub fn is_delete_safe(&self) -> bool {
+        self.view().is_delete_safe()
+    }
+
+    pub fn are_tombstones_full(&self) -> bool {
+        self.view().are_tombstones_full()
+    }
+
     pub fn find_pos<C>(&self, key: &K, c: &C) -> usize
     where
         C: KeyComparator<K>,
@@ -493,6 +525,38 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         }
 
         self.set_num_tombstones(next_tombstone);
+    }
+
+    // Physically removes the entry at idx. If idx is tombstoned, its tombstone is removed too.
+    pub fn remove_at(&mut self, idx: usize) {
+        let size = self.curr_size();
+        let num_tombstones = self.num_tombstones();
+
+        assert!(idx < size);
+
+        for i in (idx + 1)..size {
+            self.copy_entry(i, i - 1);
+        }
+
+        let mut next_tombstone = 0;
+
+        for i in 0..num_tombstones {
+            let mut tombstone_idx = usize::from(self.tombstones()[i]);
+
+            if tombstone_idx == idx {
+                continue;
+            }
+
+            if tombstone_idx > idx {
+                tombstone_idx -= 1;
+            }
+
+            self.tombstones_mut()[next_tombstone] = tombstone_idx.try_into().unwrap();
+            next_tombstone += 1;
+        }
+
+        self.set_num_tombstones(next_tombstone);
+        self.set_size(size - 1);
     }
 }
 
@@ -758,5 +822,93 @@ mod tests {
             leaf.find_insert_pos(&20, &Rid::new(1, 4), &U64Comparator),
             3
         );
+    }
+
+    #[test]
+    fn remove_at_shifts_entries_left() {
+        let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data.0);
+        leaf.set_size(4);
+        leaf.write_entry(0, &10, &Rid::new(1, 10));
+        leaf.write_entry(1, &20, &Rid::new(1, 20));
+        leaf.write_entry(2, &30, &Rid::new(1, 30));
+        leaf.write_entry(3, &40, &Rid::new(1, 40));
+
+        leaf.remove_at(1);
+
+        assert_eq!(leaf.curr_size(), 3);
+        assert_eq!(*leaf.key_ref(0), 10);
+        assert_eq!(*leaf.rid_ref(0), Rid::new(1, 10));
+        assert_eq!(*leaf.key_ref(1), 30);
+        assert_eq!(*leaf.rid_ref(1), Rid::new(1, 30));
+        assert_eq!(*leaf.key_ref(2), 40);
+        assert_eq!(*leaf.rid_ref(2), Rid::new(1, 40));
+    }
+
+    #[test]
+    fn remove_at_shifts_tombstone_indexes_left() {
+        let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data.0);
+        leaf.set_size(5);
+        for idx in 0..5 {
+            let key = ((idx + 1) * 10) as u64;
+            leaf.write_entry(idx, &key, &Rid::new(1, key as usize));
+        }
+        leaf.set_num_tombstones(3);
+        leaf.tombstones_mut()[..3].copy_from_slice(&[
+            TombstoneIndex(0),
+            TombstoneIndex(2),
+            TombstoneIndex(4),
+        ]);
+
+        leaf.remove_at(1);
+
+        assert_eq!(leaf.curr_size(), 4);
+        assert_eq!(leaf.num_tombstones(), 3);
+        assert_eq!(leaf.tombstones()[0].0, 0);
+        assert_eq!(leaf.tombstones()[1].0, 1);
+        assert_eq!(leaf.tombstones()[2].0, 3);
+    }
+
+    #[test]
+    fn remove_at_removes_matching_tombstone() {
+        let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data.0);
+        leaf.set_size(5);
+        for idx in 0..5 {
+            let key = ((idx + 1) * 10) as u64;
+            leaf.write_entry(idx, &key, &Rid::new(1, key as usize));
+        }
+        leaf.set_num_tombstones(3);
+        leaf.tombstones_mut()[..3].copy_from_slice(&[
+            TombstoneIndex(0),
+            TombstoneIndex(2),
+            TombstoneIndex(4),
+        ]);
+
+        leaf.remove_at(2);
+
+        assert_eq!(leaf.curr_size(), 4);
+        assert_eq!(leaf.num_tombstones(), 2);
+        assert_eq!(leaf.tombstones()[0].0, 0);
+        assert_eq!(leaf.tombstones()[1].0, 3);
+    }
+
+    #[test]
+    fn remove_at_allows_removing_last_entry() {
+        let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
+        let mut leaf = BTreeLeafPageMut::<u64, 8>::init(&mut data.0);
+        leaf.set_size(3);
+        leaf.write_entry(0, &10, &Rid::new(1, 10));
+        leaf.write_entry(1, &20, &Rid::new(1, 20));
+        leaf.write_entry(2, &30, &Rid::new(1, 30));
+
+        leaf.remove_at(2);
+
+        assert_eq!(leaf.curr_size(), 2);
+        assert_eq!(*leaf.key_ref(0), 10);
+        assert_eq!(*leaf.rid_ref(0), Rid::new(1, 10));
+        assert_eq!(*leaf.key_ref(1), 20);
+        assert_eq!(*leaf.rid_ref(1), Rid::new(1, 20));
     }
 }
