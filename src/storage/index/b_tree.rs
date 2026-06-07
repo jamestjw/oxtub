@@ -259,7 +259,6 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
     fn insert_pessimistic(&self, key: K, value: Rid) -> Result<(), BTreeError> {
         let mut ctx = BTreeContext::new();
         let mut header_guard = self.header_guard_mut()?;
-        // ctx.header = Some(self.header_guard_mut()?);
         let mut header_page = BTreeRootPageMut::from_data(header_guard.data_mut());
 
         if header_page.root_page_id() == INVALID_PAGE_ID {
@@ -466,7 +465,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         }
     }
 
-    pub fn remove(&mut self, key: K, value: Rid) -> Result<(), BTreeError> {
+    pub fn remove(&self, key: K, value: Rid) -> Result<(), BTreeError> {
         let mut ctx = BTreeContext::new();
 
         let header_guard = self.header_guard()?;
@@ -505,15 +504,40 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         let leaf_is_root = leaf_page_id == root_page_id;
         let leaf_is_safe = self.is_leaf_delete_safe(&leaf, leaf_is_root);
 
-        if leaf_is_safe {
-            ctx.release_read_path();
+        // Note that the leaf guard is already popped from the context, everything
+        // else we no longer need, either we an optimistic delete with the leaf guard alone,
+        // or pessimistic delete will reattempt to get all the necessary latches from scratch
+        ctx.release_all();
 
-            if leaf.are_tombstones_full() {
-                // Must mean that we can just remove the key directly
-            }
+        if !leaf_is_safe {
+            drop(leaf_guard);
+            return self.remove_pessimistic(key, value);
         }
 
+        self.delete_from_leaf(&mut leaf, idx);
+
+        Ok(())
+    }
+
+    fn remove_pessimistic(&self, key: K, value: Rid) -> Result<(), BTreeError> {
         todo!()
+    }
+
+    // Returns true if deletion physically removed any entry from the leaf.
+    fn delete_from_leaf(&self, leaf: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>, idx: usize) -> bool {
+        if TOMB_CAP == 0 {
+            leaf.remove_at(idx);
+            return true;
+        }
+
+        if !leaf.are_tombstones_full() {
+            leaf.add_tombstone(idx);
+            return false;
+        }
+
+        leaf.evict_oldest_tombstone_and_append(idx);
+
+        true
     }
 
     fn descend_read_path_for_delete(
@@ -525,10 +549,20 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
     }
 
     fn is_leaf_delete_safe(&self, leaf: &BTreeLeafPageMut<'_, K, TOMB_CAP>, is_root: bool) -> bool {
-        // - Root leaf can have any number of keys, so deletion is always fine
-        // - If we have tombstone capacity, then delete must be safe
-        // - If we are above min size, we can lose one key without being underweight
-        is_root || !leaf.are_tombstones_full() || leaf.is_delete_safe()
+        // A leaf is safe for optimistic deletion if deleting from it cannot require
+        // borrowing/merging with a sibling.
+        // - A root leaf can be underweight, but leaf-only deletion must not physically
+        //   remove the final tuple.
+        // - If there is a free tombstone slot, deletion only adds a tombstone and
+        //   does not reduce physical size.
+        // - If tombstones are full, deletion evicts one physical entry, so the leaf
+        //   must be above min size.
+
+        if is_root {
+            leaf.curr_size() > 1 || TOMB_CAP > 0
+        } else {
+            !leaf.are_tombstones_full() || leaf.is_delete_safe()
+        }
     }
 
     // Iteration uses panicking semantics for buffer pool failures.

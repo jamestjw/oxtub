@@ -510,6 +510,34 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         self.set_size(start_idx);
     }
 
+    pub fn add_tombstone(&mut self, idx: usize) {
+        assert!(!self.are_tombstones_full());
+        assert!(idx < self.curr_size());
+        let num_tombstones = self.num_tombstones();
+        self.tombstones_mut()[num_tombstones] = idx.try_into().unwrap();
+        self.set_num_tombstones(num_tombstones + 1);
+    }
+
+    // Removes the oldest tombstone, and adds a tombstone for the entry at idx
+    pub fn evict_oldest_tombstone_and_append(&mut self, idx: usize) {
+        let num_tombstones = self.num_tombstones();
+
+        assert!(num_tombstones > 0, "no tombstones to evict");
+        assert!(idx < self.curr_size(), "invalid idx");
+        assert!(!self.is_idx_tombstoned(idx), "idx already deleted");
+
+        let evicted_idx = self.tombstones()[0];
+        self.remove_at(usize::from(evicted_idx));
+
+        let idx = if idx > evicted_idx.into() {
+            idx - 1
+        } else {
+            idx
+        };
+
+        self.add_tombstone(idx);
+    }
+
     // TODO: maybe should be more defensive and actually check if idx is a tombstone
     pub fn remove_tombstone_at(&mut self, idx: usize) {
         assert!(idx < self.curr_size());
