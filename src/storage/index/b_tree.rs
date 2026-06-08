@@ -41,6 +41,10 @@ impl<'a> BTreeContext<'a> {
         }
     }
 
+    pub fn set_root_page_id(&mut self, page_id: PageId) {
+        self.root_page_id = page_id;
+    }
+
     pub fn is_root(&self, page_id: PageId) -> bool {
         page_id == self.root_page_id
     }
@@ -520,7 +524,225 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
     }
 
     fn remove_pessimistic(&self, key: K, value: Rid) -> Result<(), BTreeError> {
+        let mut ctx = BTreeContext::new();
+        ctx.header = Some(self.header_guard_mut()?);
+
+        let root_page_id =
+            BTreeRootPage::from_data(ctx.header.as_ref().unwrap().data()).root_page_id();
+        assert_ne!(root_page_id, INVALID_PAGE_ID);
+
+        ctx.set_root_page_id(root_page_id);
+        ctx.write_set.push(self.bpm.write_page(root_page_id)?);
+        self.descend_write_path_for_delete(&mut ctx, key)?;
+
+        let mut leaf_guard = ctx.write_set.pop().unwrap();
+        let leaf_page_id = leaf_guard.page_id();
+        let mut leaf = Self::leaf_page_mut(leaf_guard.data_mut());
+        let delete_idx = leaf.find_insert_pos(&key, &value, self.comparator);
+
+        // Verify again that the thing we want to delete is valid
+        if delete_idx >= leaf.curr_size()
+            || leaf
+                .cmp_key_rid_to_idx(&key, &value, delete_idx, self.comparator)
+                .is_ne()
+            || leaf.is_idx_tombstoned(delete_idx)
+        {
+            return Err(BTreeError::NotFound);
+        }
+
+        let is_safe = leaf.is_delete_safe();
+        let physically_deleted = self.delete_from_leaf(&mut leaf, delete_idx);
+
+        if is_safe || !physically_deleted {
+            return Ok(());
+        }
+
+        // Leaf is also the root page of tree, it could be underweight
+        if ctx.write_set.is_empty() {
+            // Deallocate page if the tree is completely empty
+            if leaf.curr_size() == 0 {
+                BTreeRootPageMut::from_data(ctx.header.unwrap().data_mut())
+                    .set_root_page_id(INVALID_PAGE_ID);
+                drop(leaf_guard);
+                self.bpm.delete_page(leaf_page_id)?;
+            }
+
+            return Ok(());
+        }
+
+        // From this point onwards, we know that we MUST rebalance and that we
+        // have at least one parent.
+        let mut parent_guard = ctx.write_set.last_mut().unwrap();
+        let mut parent = Self::internal_page_mut(parent_guard.data_mut());
+        let leaf_idx = parent
+            .value_idx(&leaf_page_id)
+            .expect("leaf has to belong to parent");
+        let left_sibling_idx = leaf_idx.checked_sub(1);
+        let right_sibling_idx = leaf_idx + 1;
+
+        // Try borrowing with leaf sibling first
+        if let Some(left_sibling_idx) = left_sibling_idx {
+            let mut sibling_guard = self.bpm.write_page(*parent.value_at(left_sibling_idx))?;
+            let mut sibling_page = Self::leaf_page_mut(sibling_guard.data_mut());
+
+            if Self::try_borrow_from_left_leaf(&mut parent, leaf_idx, &mut leaf, &mut sibling_page)
+            {
+                return Ok(());
+            }
+        }
+
+        // Try borrowing with right sibling next
+        if right_sibling_idx < parent.curr_size() {
+            let mut sibling_guard = self.bpm.write_page(*parent.value_at(right_sibling_idx))?;
+            let mut sibling_page = Self::leaf_page_mut(sibling_guard.data_mut());
+
+            if Self::try_borrow_from_right_leaf(
+                &mut parent,
+                right_sibling_idx,
+                &mut leaf,
+                &mut sibling_page,
+            ) {
+                return Ok(());
+            }
+        }
+
+        // Try merging with leaf sibling
+        if let Some(left_sibling_idx) = left_sibling_idx {
+            let mut sibling_guard = self.bpm.write_page(*parent.value_at(left_sibling_idx))?;
+            let mut sibling_page = Self::leaf_page_mut(sibling_guard.data_mut());
+            if Self::can_merge_right_into_leaf(&sibling_page, &leaf) {
+                sibling_page.coalesce_right_into_page(&mut leaf);
+                parent.remove_at(leaf_idx);
+                drop(leaf_guard);
+                drop(sibling_guard);
+                self.bpm.delete_page(leaf_page_id)?;
+
+                return self.propagate_parent_underflow(ctx);
+            }
+        }
+
+        // Try merging with right sibling
+        if right_sibling_idx < parent.curr_size() {
+            let mut sibling_guard = self.bpm.write_page(*parent.value_at(right_sibling_idx))?;
+            let sibling_page_id = sibling_guard.page_id();
+            let mut sibling_page = Self::leaf_page_mut(sibling_guard.data_mut());
+
+            if Self::can_merge_right_into_leaf(&leaf, &sibling_page) {
+                leaf.coalesce_right_into_page(&mut sibling_page);
+                parent.remove_at(right_sibling_idx);
+                drop(leaf_guard);
+                drop(sibling_guard);
+
+                self.bpm.delete_page(sibling_page_id)?;
+
+                return self.propagate_parent_underflow(ctx);
+            }
+        }
+
+        panic!("delete rebalancing invariant violated: neither sibling can lend or merge")
+    }
+
+    fn propagate_parent_underflow(&self, ctx: BTreeContext) -> Result<(), BTreeError> {
         todo!()
+    }
+
+    fn try_borrow_from_left_leaf(
+        parent: &mut BTreeInternalPageMut<'_, K>,
+        leaf_idx: usize,
+        leaf: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>,
+        donor: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>,
+    ) -> bool {
+        if !donor.is_delete_safe() {
+            return false;
+        }
+
+        let donated_idx = donor.curr_size() - 1;
+        let donation_is_tombstoned = donor.is_idx_tombstoned(donated_idx);
+
+        if donation_is_tombstoned && leaf.are_tombstones_full() {
+            // We could make space in our tombstone array to accommodate it,
+            // but that might mean that we would have to borrow more than one
+            // key, so forget it
+            return false;
+        }
+
+        let borrowed_key = *donor.key_ref(donated_idx);
+        let borrowed_value = *donor.rid_ref(donated_idx);
+        leaf.insert_at(0, &borrowed_key, &borrowed_value);
+        if donation_is_tombstoned {
+            leaf.add_tombstone(0);
+        }
+
+        donor.remove_at(donated_idx);
+        // Update separator keys of the parent as the leaf now has an updated
+        // first key that could be inferior to the previous separator
+        parent.set_index_key_at(leaf_idx, &borrowed_key, &borrowed_value);
+
+        true
+    }
+
+    fn try_borrow_from_right_leaf(
+        parent: &mut BTreeInternalPageMut<'_, K>,
+        donor_idx: usize,
+        leaf: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>,
+        donor: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>,
+    ) -> bool {
+        if !donor.is_delete_safe() {
+            return false;
+        }
+
+        let donated_idx = 0;
+        let donation_is_tombstoned = donor.is_idx_tombstoned(donated_idx);
+
+        if donation_is_tombstoned && leaf.are_tombstones_full() {
+            return false;
+        }
+
+        let borrowed_key = *donor.key_ref(donated_idx);
+        let borrowed_value = *donor.rid_ref(donated_idx);
+        let leaf_size = leaf.curr_size();
+        leaf.insert_at(leaf_size, &borrowed_key, &borrowed_value);
+        if donation_is_tombstoned {
+            leaf.add_tombstone(leaf_size);
+        }
+
+        donor.remove_at(donated_idx);
+        // Update the donor child's parent separator because donor's first entry changed.
+        debug_assert!(donor.curr_size() > 0);
+        parent.set_index_key_at(donor_idx, donor.key_ref(0), donor.rid_ref(0));
+
+        true
+    }
+
+    fn can_merge_right_into_leaf(
+        left: &BTreeLeafPageMut<'_, K, TOMB_CAP>,
+        right: &BTreeLeafPageMut<'_, K, TOMB_CAP>,
+    ) -> bool {
+        // Merge means moving all entries from `right` into `left`.
+        // Without tombstones, this is safe after borrow fails because both pages are
+        // small enough to fit together.
+        //
+        // With tombstones, two things can prevent a direct merge:
+        // - the combined physical entry count may exceed max_size;
+        // - the combined tombstone count may exceed TOMB_CAP.
+        //
+        // We can make room by physically removing tombstoned entries before/during the
+        // merge. Removing tombstoned entries reduces both physical size and tombstone
+        // count, and does not remove live tuples.
+
+        let total_entries = left.curr_size() + right.curr_size();
+        let total_tombstones = left.get_tombstone_count() + right.get_tombstone_count();
+
+        debug_assert!(total_tombstones <= total_entries);
+
+        let total_entries = left.curr_size() + right.curr_size();
+        let total_tombstones = left.get_tombstone_count() + right.get_tombstone_count();
+
+        let required_prunes = total_entries
+            .saturating_sub(left.max_size())
+            .max(total_tombstones.saturating_sub(TOMB_CAP));
+
+        required_prunes <= total_tombstones && total_entries - required_prunes >= left.min_size()
     }
 
     // Returns true if deletion physically removed any entry from the leaf.
@@ -541,6 +763,14 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
     }
 
     fn descend_read_path_for_delete(
+        &self,
+        ctx: &mut BTreeContext<'a>,
+        key: K,
+    ) -> Result<(), BTreeError> {
+        todo!()
+    }
+
+    fn descend_write_path_for_delete(
         &self,
         ctx: &mut BTreeContext<'a>,
         key: K,

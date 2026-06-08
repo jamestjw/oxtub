@@ -368,7 +368,7 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         self.view().cmp_key_rid_to_idx(key, rid, idx, c)
     }
 
-    fn num_tombstones(&self) -> usize {
+    pub fn get_tombstone_count(&self) -> usize {
         self.view().get_tombstone_count()
     }
 
@@ -498,7 +498,7 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
 
         // compact local tombstones and adjust num_tombstones
         let mut remaining_tombstone_idx = 0;
-        let num_tombstones = self.num_tombstones();
+        let num_tombstones = self.get_tombstone_count();
         let tombstones = self.tombstones_mut();
         for i in 0..num_tombstones {
             if usize::from(tombstones[i]) < start_idx {
@@ -513,14 +513,14 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
     pub fn add_tombstone(&mut self, idx: usize) {
         assert!(!self.are_tombstones_full());
         assert!(idx < self.curr_size());
-        let num_tombstones = self.num_tombstones();
+        let num_tombstones = self.get_tombstone_count();
         self.tombstones_mut()[num_tombstones] = idx.try_into().unwrap();
         self.set_num_tombstones(num_tombstones + 1);
     }
 
     // Removes the oldest tombstone, and adds a tombstone for the entry at idx
     pub fn evict_oldest_tombstone_and_append(&mut self, idx: usize) {
-        let num_tombstones = self.num_tombstones();
+        let num_tombstones = self.get_tombstone_count();
 
         assert!(num_tombstones > 0, "no tombstones to evict");
         assert!(idx < self.curr_size(), "invalid idx");
@@ -543,7 +543,7 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         assert!(idx < self.curr_size());
         let mut next_tombstone = 0;
 
-        for i in 0..self.num_tombstones() {
+        for i in 0..self.get_tombstone_count() {
             if usize::from(self.tombstones()[i]) == idx {
                 continue;
             }
@@ -558,7 +558,7 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
     // Physically removes the entry at idx. If idx is tombstoned, its tombstone is removed too.
     pub fn remove_at(&mut self, idx: usize) {
         let size = self.curr_size();
-        let num_tombstones = self.num_tombstones();
+        let num_tombstones = self.get_tombstone_count();
 
         assert!(idx < size);
 
@@ -585,6 +585,10 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
 
         self.set_num_tombstones(next_tombstone);
         self.set_size(size - 1);
+    }
+
+    pub fn coalesce_right_into_page(&mut self, right: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>) {
+        todo!()
     }
 }
 
@@ -802,10 +806,10 @@ mod tests {
         source.move_split_entries_to(&mut recipient, 2);
 
         assert_eq!(source.curr_size(), 2);
-        assert_eq!(source.num_tombstones(), 1);
+        assert_eq!(source.get_tombstone_count(), 1);
         assert_eq!(source.tombstones()[0].0, 1);
         assert_eq!(recipient.curr_size(), 2);
-        assert_eq!(recipient.num_tombstones(), 0);
+        assert_eq!(recipient.get_tombstone_count(), 0);
         assert_eq!(*recipient.key_ref(0), 30);
         assert_eq!(*recipient.rid_ref(0), Rid::new(1, 30));
         assert_eq!(*recipient.key_ref(1), 50);
@@ -892,7 +896,7 @@ mod tests {
         leaf.remove_at(1);
 
         assert_eq!(leaf.curr_size(), 4);
-        assert_eq!(leaf.num_tombstones(), 3);
+        assert_eq!(leaf.get_tombstone_count(), 3);
         assert_eq!(leaf.tombstones()[0].0, 0);
         assert_eq!(leaf.tombstones()[1].0, 1);
         assert_eq!(leaf.tombstones()[2].0, 3);
@@ -917,7 +921,7 @@ mod tests {
         leaf.remove_at(2);
 
         assert_eq!(leaf.curr_size(), 4);
-        assert_eq!(leaf.num_tombstones(), 2);
+        assert_eq!(leaf.get_tombstone_count(), 2);
         assert_eq!(leaf.tombstones()[0].0, 0);
         assert_eq!(leaf.tombstones()[1].0, 3);
     }
