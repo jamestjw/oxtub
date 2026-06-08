@@ -92,23 +92,178 @@ logical key matches.
 This layout is simple and correct, but duplicate-heavy indexes repeat the same
 key many times.
 
-## Current Tombstone Limitations
+## Tombstone-Aware Delete Rebalancing
 
-The current leaf-page tombstones are logical delete markers over physical
-entries ordered by `(K, Rid)`. A tombstone stores an index into the leaf entry
-array; it does not create a reusable free slot.
+Leaf-page tombstones are logical delete markers over physical entries ordered by
+`(K, Rid)`. A tombstone stores an index into the leaf entry array; it does not
+create a reusable free slot. Tombstoned entries still count toward
+`curr_size()`, still consume leaf capacity, and still belong to the leaf's key
+range because reinserting the same exact `(K, Rid)` can clear the tombstone.
 
-This means tombstones only help if the exact same `(K, Rid)` pair is inserted
-again and we explicitly clear that tombstone. In normal table usage, a later
-insert for the same logical key usually has a different `Rid`, so the tombstoned
-entry cannot be reused.
+Structural delete rebalancing is allowed to physically prune tombstoned entries.
+It must never prune live entries. For now, favor code simplicity and correctness
+over preserving tombstones for possible future reinsertion. Rebalancing should
+therefore compact aggressively, keeping tombstones only when required to satisfy
+the minimum physical occupancy invariant.
 
-Tombstoned entries also still count toward `curr_size()`, so they reduce usable
-leaf capacity until a split or compaction path physically drops them.
+Important invariants:
 
-For now, prefer running the B-tree with `TOMB_CAP = 0`. Tombstones should be
-revisited once the leaf layout supports real compaction/reuse, or once we have a
-specific MVCC/delete protocol that benefits from delayed physical removal.
+- Leaf entries are physically sorted by `(K, Rid)`.
+- `curr_size()` includes tombstoned entries.
+- `num_tombstones <= TOMB_CAP`.
+- Every tombstone index is unique and points to an existing physical entry.
+- Non-root leaves satisfy `curr_size() >= min_size()`.
+- Internal page slot `0` has only a child pointer.
+- Internal page slot `i > 0` stores the lower-bound `(K, Rid)` for child `i`.
+- Internal separators may be stale lower bounds after deletion.
+- Plain deletion does not require separator repair.
+- Redistribution requires separator repair because entries cross sibling ranges.
+
+Exact deletes must route to the target leaf by full `(K, Rid)`, not by logical
+`K` alone. Logical `K` routing is for lookup scans that need the leftmost
+duplicate range. Exact delete should use the same full-index-key routing as
+insertion.
+
+### Leaf Pair Rebalancing
+
+When a physical delete makes a non-root leaf underweight, rebalance that leaf
+with one adjacent sibling. Prefer the left sibling when available; otherwise use
+the right sibling.
+
+The robust primitive is an adjacent-pair rebalance:
+
+```text
+rebalance_leaf_pair(left, right) -> Redistributed | Merged
+```
+
+The operation should materialize the two leaves as a sorted sequence of entries:
+
+```text
+(key, rid, is_tombstoned)
+```
+
+Then count:
+
+```text
+M = leaf.max_size()
+m = leaf.min_size()
+C = TOMB_CAP
+P = total physical entries across the pair
+T = total tombstoned entries across the pair
+L = P - T
+```
+
+If `L > M`, the live entries cannot fit in one leaf, so the pair must remain two
+leaves. Rebuild two leaves from live entries only. Tombstone capacity cannot
+block this fallback because both rebuilt leaves have zero tombstones.
+
+A valid split always exists. After a single underflowing physical delete:
+
+```text
+deficient_size = m - 1
+sibling_size <= M
+L <= P <= M + m - 1
+L > M >= 2m
+```
+
+Choose `m` live entries for the left page and `L - m` live entries for the right
+page:
+
+```text
+left_size = m
+right_size = L - m
+```
+
+The left page is valid because it has exactly `m` entries.
+
+The right page is not underweight because `L > M >= 2m`:
+
+```text
+L > M >= 2m
+L >= 2m + 1
+right_size = L - m
+right_size >= m + 1
+```
+
+The right page is not overweight because `L <= P <= M + m - 1`:
+
+```text
+L <= M + m - 1
+right_size = L - m
+right_size <= M - 1
+```
+
+Therefore both pages satisfy occupancy. Since the fallback redistribution uses
+live entries only, both pages have zero tombstones and automatically satisfy
+`num_tombstones <= TOMB_CAP`. Sorted order is preserved by taking the first `m`
+live entries for the left page and the remaining live entries for the right page.
+
+If `L <= M`, the live entries fit in one leaf, so the pair can merge. If
+`L >= m`, merge with live entries only. If `L < m`, retain exactly `m - L`
+tombstoned entries as physical filler and prune all other tombstones. This is the
+only case where structural rebalance should keep tombstones for now.
+
+The filler amount is always available and fits tombstone capacity:
+
+```text
+q = m - L
+q <= T
+q <= C
+```
+
+`q <= T` because the pair has enough total physical entries before compaction:
+
+```text
+P = L + T
+P >= 2m - 1 >= m
+T = P - L >= m - L = q
+```
+
+`q <= C` is immediate when `C >= m`. When `C < m`, each source page has at most
+`C` tombstones, so:
+
+```text
+L >= (m - 1 - C) + (m - C)
+L >= 2m - 1 - 2C
+q = m - L
+q <= 2C - m + 1
+q <= C
+```
+
+The last step follows from `C < m`. Therefore, merge cannot fail due tombstone
+capacity.
+
+This makes leaf rebalancing total as long as structural repair may compact
+tombstones. A raw one-entry borrow or raw physical merge may still be used as an
+optimization later, but it should not be the correctness primitive.
+
+### Correctness-First Rebalance Policy
+
+We use this order for deletes:
+
+```text
+1. If the delete only adds a tombstone, stop.
+2. If physical delete does not underflow, stop.
+3. If a non-root leaf underflows, run adjacent-pair rebalance.
+4. If rebalance redistributes two leaves, update the parent separator for the
+   right leaf.
+5. If rebalance merges into one leaf, remove the deleted child pointer from the
+   parent and propagate parent underflow if needed.
+```
+
+For simplicity, adjacent-pair rebalance should compact tombstones aggressively.
+Preserving extra tombstones or minimizing entry movement is a future
+optimization; correctness only requires keeping live entries and enough
+tombstoned filler to satisfy non-root minimum occupancy after a merge.
+
+A useful future optimization is to prefer two-page redistribution over merge
+whenever both are valid. Redistribution only rewrites the two sibling leaves and
+updates one parent separator, so repair stops at the leaf level. Merge removes a
+child pointer from the parent, deletes a page, and may make the parent
+underweight, causing underflow repair to propagate up the tree. The
+correctness-first implementation may merge whenever `L <= M`; an optimized
+implementation can first check whether retaining enough tombstoned filler allows
+both pages to remain valid, and redistribute instead when possible.
 
 ## Future Duplicate Deduplication With Posting Lists
 
