@@ -108,6 +108,10 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageView<'a, K, TOMB_CAP> {
         self.header().common.current_size as usize
     }
 
+    fn live_size(&self) -> usize {
+        self.curr_size() - self.get_tombstone_count()
+    }
+
     fn tombstones(&self) -> &[TombstoneIndex] {
         let start = Self::TOMBSTONES_OFFSET;
         let end = start + TOMB_CAP * size_of::<TombstoneIndex>();
@@ -188,8 +192,8 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageView<'a, K, TOMB_CAP> {
     fn is_idx_tombstoned(&self, idx: usize) -> bool {
         let tombstones = self.tombstones();
 
-        for i in 0..self.get_tombstone_count() {
-            if usize::from(tombstones[i]) == idx {
+        for tombstone in tombstones.iter().take(self.get_tombstone_count()) {
+            if usize::from(*tombstone) == idx {
                 return true;
             }
         }
@@ -359,6 +363,10 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
 
     pub fn is_insert_safe(&self) -> bool {
         self.view().is_insert_safe()
+    }
+
+    pub fn live_size(&self) -> usize {
+        self.view().live_size()
     }
 
     pub fn cmp_key_rid_to_idx<C>(&self, key: &K, rid: &Rid, idx: usize, c: &C) -> std::cmp::Ordering
@@ -553,6 +561,36 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         }
 
         self.set_num_tombstones(next_tombstone);
+    }
+
+    pub fn remove_all_tombstones(&mut self) {
+        let num_tombstones = self.get_tombstone_count();
+        if num_tombstones == 0 {
+            return;
+        }
+
+        // TODO: for performance reasons, we should do this with no allocation
+        // and copies
+        let mut live_keys = vec![];
+        let mut live_rids = vec![];
+
+        for idx in 0..self.curr_size() {
+            if self.tombstones()[..num_tombstones]
+                .iter()
+                .find(|tombstone| usize::from(**tombstone) == idx)
+                .is_none()
+            {
+                live_keys.push(*self.key_ref(idx));
+                live_rids.push(*self.rid_ref(idx));
+            }
+        }
+
+        self.set_size(live_keys.len());
+        self.set_num_tombstones(0);
+
+        for (idx, (key, rid)) in live_keys.iter().zip(live_rids).enumerate() {
+            self.write_entry(idx, key, &rid);
+        }
     }
 
     // Physically removes the entry at idx. If idx is tombstoned, its tombstone is removed too.

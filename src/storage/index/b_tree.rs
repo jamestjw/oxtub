@@ -646,6 +646,51 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         todo!()
     }
 
+    fn redistribute_leaf_pair(
+        parent: &mut BTreeInternalPageMut<'_, K>,
+        left: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>,
+        right: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>,
+        right_idx: usize,
+    ) {
+        assert!(left.live_size() + right.live_size() > left.max_size());
+
+        left.remove_all_tombstones();
+        right.remove_all_tombstones();
+
+        // Check who is underweight, and make them have at least min size
+        if left.curr_size() < left.min_size() {
+            let required_count = left.min_size() - left.curr_size();
+            assert!(right.curr_size() >= right.min_size() + required_count);
+
+            for _ in 0..required_count {
+                let borrowed_key = *right.key_ref(0);
+                let borrowed_value = *right.rid_ref(0);
+                left.insert_at(left.curr_size(), &borrowed_key, &borrowed_value);
+                right.remove_at(0);
+            }
+        } else if right.curr_size() < right.min_size() {
+            let required_count = right.min_size() - right.curr_size();
+            assert!(left.curr_size() >= left.min_size() + required_count);
+
+            // todo: this is definitely not the most efficient way to copy,
+            // optimise this later
+            for _ in 0..required_count {
+                let borrowed_key = *left.key_ref(left.curr_size() - 1);
+                let borrowed_value = *left.rid_ref(left.curr_size() - 1);
+                right.insert_at(0, &borrowed_key, &borrowed_value);
+                left.remove_at(left.curr_size() - 1);
+            }
+        } else {
+            // We should never use this function in this way
+            panic!("logic error");
+        }
+
+        let right_sep_key = *right.key_ref(0);
+        let right_sep_value = *right.rid_ref(0);
+
+        parent.set_index_key_at(right_idx, &right_sep_key, &right_sep_value);
+    }
+
     fn try_borrow_from_left_leaf(
         parent: &mut BTreeInternalPageMut<'_, K>,
         leaf_idx: usize,
