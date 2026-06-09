@@ -583,7 +583,7 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         for idx in 0..self.curr_size() {
             if self.tombstones()[..num_tombstones]
                 .iter()
-                .find(|tombstone| usize::from(**tombstone) == idx)
+                .find(|&tombstone| usize::from(*tombstone) == idx)
                 .is_none()
             {
                 live_keys.push(*self.key_ref(idx));
@@ -631,8 +631,31 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         self.set_size(size - 1);
     }
 
+    // Brings all the physical entries from the right page into us, maintaining tombstones
+    // on both sides
     pub fn coalesce_right_into_page(&mut self, right: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>) {
-        todo!()
+        assert!(
+            self.curr_size() + right.curr_size() <= self.max_size(),
+            "merged leaf would exceed max size"
+        );
+        assert!(
+            self.get_tombstone_count() + right.get_tombstone_count() <= TOMB_CAP,
+            "merged leaf would exceed tombstone capacity"
+        );
+
+        let left_size = self.curr_size();
+        for right_idx in 0..right.curr_size() {
+            self.write_entry(
+                left_size + right_idx,
+                right.key_ref(right_idx),
+                right.rid_ref(right_idx),
+            );
+        }
+        self.set_size(left_size + right.curr_size());
+
+        for &tombstone in right.tombstones().iter().take(right.get_tombstone_count()) {
+            self.add_tombstone(usize::try_from(tombstone).unwrap() + left_size);
+        }
     }
 }
 
