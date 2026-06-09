@@ -45,4 +45,14 @@ impl BTreeNodeHeader {
             self.current_size < self.max_size
         }
     }
+
+    pub fn min_size(&self) -> usize {
+        let max_size = self.max_size as usize;
+
+        if self.is_leaf() {
+            max_size / 2
+        } else {
+            max_size.div_ceil(2)
+        }
+    }
 }

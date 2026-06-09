@@ -105,6 +105,10 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageView<'a, K, 
         Self::KEYS_OFFSET + idx * Self::INDEX_KEY_SIZE
     }
 
+    pub fn min_size(&self) -> usize {
+        self.max_size().div_ceil(2)
+    }
+
     fn key_ref(&self, idx: usize) -> &K {
         let start = Self::index_key_offset(idx);
         let end = start + size_of::<K>();
@@ -245,6 +249,10 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPage<'a, K, PAGE
         C: KeyComparator<K>,
     {
         self.view.find_child_idx_for_insert(key, rid, c)
+    }
+
+    pub fn min_size(&self) -> usize {
+        self.view.min_size()
     }
 }
 
@@ -488,7 +496,7 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
     }
 
     pub fn min_size(&self) -> usize {
-        self.max_size().div_ceil(2)
+        self.view().min_size()
     }
 
     pub fn set_size(&mut self, size: usize) {

@@ -62,9 +62,8 @@ impl<'a> BTreeContext<'a> {
     }
 
     pub fn release_read_ancestors(&mut self) {
-        let current = self.read_set.pop();
-        self.read_set.clear();
-        if let Some(current) = current {
+        if let Some(current) = self.read_set.pop() {
+            self.read_set.clear();
             self.read_set.push(current);
         }
         self.header.take();
@@ -72,9 +71,8 @@ impl<'a> BTreeContext<'a> {
 
     pub fn release_write_ancestors(&mut self) {
         self.header.take();
-        let current = self.write_set.pop();
-        self.write_set.clear();
-        if let Some(current) = current {
+        if let Some(current) = self.write_set.pop() {
+            self.write_set.clear();
             self.write_set.push(current);
         }
     }
@@ -343,6 +341,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
             let leaf_page_id = ctx.read_set.last().unwrap().page_id();
             ctx.read_set.pop();
             ctx.write_set.push(self.bpm.write_page(leaf_page_id)?);
+            ctx.release_read_path();
             return Ok(());
         }
 
@@ -361,18 +360,15 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
             let next_page = BTreeNodeHeader::from_data(next_guard.data());
 
             if next_page.is_leaf() {
-                // Drop so can get the writer latch instead
+                // Drop so can get the write latch instead
                 drop(next_guard);
                 ctx.write_set.push(self.bpm.write_page(next_page_id)?);
+                ctx.release_read_path();
                 return Ok(());
             }
 
-            let insert_is_safe = next_page.is_insert_safe();
             ctx.read_set.push(next_guard);
-
-            if insert_is_safe {
-                ctx.release_read_ancestors();
-            }
+            ctx.release_read_ancestors();
         }
     }
 
@@ -404,6 +400,47 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
             } else {
                 ctx.write_set.push(child_guard);
             }
+        }
+    }
+
+    fn descend_read_path_for_delete(
+        &self,
+        ctx: &mut BTreeContext<'a>,
+        key: K,
+        value: Rid,
+    ) -> Result<(), BTreeError> {
+        if BTreeNodeHeader::from_data(ctx.read_set.last().unwrap().data()).is_leaf() {
+            let leaf_page_id = ctx.read_set.last().unwrap().page_id();
+            ctx.read_set.pop();
+            ctx.write_set.push(self.bpm.write_page(leaf_page_id)?);
+            ctx.release_read_path();
+            return Ok(());
+        }
+
+        // TODO: not very efficient to get the read latch on the leaf page
+        // only to immediately swap it for a write latch. It would be smarter
+        // to use the height of the BTree to anticipate whether or not the next
+        // page is a leaf and immediately get a write latch for it.
+        loop {
+            let internal = Self::internal_page(ctx.read_set.last().unwrap().data());
+            let next_page_id = *internal.value_at(internal.find_child_idx_for_insert(
+                &key,
+                &value,
+                self.comparator,
+            ));
+            let next_guard = self.bpm.read_page(next_page_id)?;
+            let next_page = BTreeNodeHeader::from_data(next_guard.data());
+
+            if next_page.is_leaf() {
+                // Drop so can get the write latch instead
+                drop(next_guard);
+                ctx.write_set.push(self.bpm.write_page(next_page_id)?);
+                ctx.release_read_path();
+                return Ok(());
+            }
+
+            ctx.read_set.push(next_guard);
+            ctx.release_read_ancestors();
         }
     }
 
@@ -511,7 +548,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
             return Err(BTreeError::NotFound);
         }
 
-        let leaf_is_root = leaf_page_id == root_page_id;
+        let leaf_is_root = ctx.is_root(leaf_page_id);
         let leaf_is_safe = self.is_leaf_delete_safe(&leaf, leaf_is_root);
 
         // Note that the leaf guard is already popped from the context, everything
@@ -842,22 +879,36 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         true
     }
 
-    fn descend_read_path_for_delete(
-        &self,
-        ctx: &mut BTreeContext<'a>,
-        key: K,
-        value: Rid,
-    ) -> Result<(), BTreeError> {
-        todo!()
-    }
-
     fn descend_write_path_for_delete(
         &self,
         ctx: &mut BTreeContext<'a>,
         key: K,
         value: Rid,
     ) -> Result<(), BTreeError> {
-        todo!()
+        loop {
+            let last_guard = ctx.write_set.last().unwrap();
+
+            if BTreeNodeHeader::from_data(last_guard.data()).is_leaf() {
+                return Ok(());
+            }
+
+            let internal_page = Self::internal_page(last_guard.data());
+            let child_page_id = *internal_page.value_at(internal_page.find_child_idx_for_insert(
+                &key,
+                &value,
+                self.comparator,
+            ));
+            let child_guard = self.bpm.write_page(child_page_id)?;
+            let child_page = BTreeNodeHeader::from_data(child_guard.data());
+            let child_is_safe = ctx.is_root(child_page_id)
+                || child_page.current_size > child_page.min_size() as u16;
+
+            ctx.write_set.push(child_guard);
+
+            if child_is_safe {
+                ctx.release_write_ancestors();
+            }
+        }
     }
 
     fn is_leaf_delete_safe(&self, leaf: &BTreeLeafPageMut<'_, K, TOMB_CAP>, is_root: bool) -> bool {
