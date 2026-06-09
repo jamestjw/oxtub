@@ -23,6 +23,12 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeafPairAction {
+    Redistribute,
+    Merge,
+}
+
 // We refer to it as a BTree for short, but in reality it's a B+ Tree
 struct BTreeContext<'a> {
     header: Option<WritePageGuard<'a>>,
@@ -484,7 +490,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         ctx.read_set.push(header_guard);
         ctx.read_set.push(self.bpm.read_page(root_page_id)?);
 
-        self.descend_read_path_for_delete(&mut ctx, key)?;
+        self.descend_read_path_for_delete(&mut ctx, key, value)?;
 
         let mut leaf_guard = ctx.write_set.pop().unwrap();
         let leaf_page_id = leaf_guard.page_id();
@@ -533,7 +539,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
 
         ctx.set_root_page_id(root_page_id);
         ctx.write_set.push(self.bpm.write_page(root_page_id)?);
-        self.descend_write_path_for_delete(&mut ctx, key)?;
+        self.descend_write_path_for_delete(&mut ctx, key, value)?;
 
         let mut leaf_guard = ctx.write_set.pop().unwrap();
         let leaf_page_id = leaf_guard.page_id();
@@ -572,74 +578,61 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
 
         // From this point onwards, we know that we MUST rebalance and that we
         // have at least one parent.
-        let mut parent_guard = ctx.write_set.last_mut().unwrap();
-        let mut parent = Self::internal_page_mut(parent_guard.data_mut());
-        let leaf_idx = parent
-            .value_idx(&leaf_page_id)
-            .expect("leaf has to belong to parent");
-        let left_sibling_idx = leaf_idx.checked_sub(1);
-        let right_sibling_idx = leaf_idx + 1;
+        let deleted_page_id = {
+            let mut parent_guard = ctx.write_set.last_mut().unwrap();
+            let mut parent = Self::internal_page_mut(parent_guard.data_mut());
+            let leaf_idx = parent
+                .value_idx(&leaf_page_id)
+                .expect("leaf has to belong to parent");
+            let left_sibling_idx = leaf_idx.checked_sub(1);
+            let right_sibling_idx = leaf_idx + 1;
 
-        // Try borrowing with leaf sibling first
-        if let Some(left_sibling_idx) = left_sibling_idx {
-            let mut sibling_guard = self.bpm.write_page(*parent.value_at(left_sibling_idx))?;
-            let mut sibling_page = Self::leaf_page_mut(sibling_guard.data_mut());
+            if let Some(left_sibling_idx) = left_sibling_idx {
+                let mut left_guard = self.bpm.write_page(*parent.value_at(left_sibling_idx))?;
+                let mut left_page = Self::leaf_page_mut(left_guard.data_mut());
 
-            if Self::try_borrow_from_left_leaf(&mut parent, leaf_idx, &mut leaf, &mut sibling_page)
-            {
-                return Ok(());
+                if Self::choose_leaf_pair_action(&left_page, &leaf) == LeafPairAction::Redistribute
+                {
+                    Self::redistribute_leaf_pair(&mut parent, &mut left_page, &mut leaf, leaf_idx);
+                    return Ok(());
+                }
             }
-        }
 
-        // Try borrowing with right sibling next
-        if right_sibling_idx < parent.curr_size() {
-            let mut sibling_guard = self.bpm.write_page(*parent.value_at(right_sibling_idx))?;
-            let mut sibling_page = Self::leaf_page_mut(sibling_guard.data_mut());
+            if right_sibling_idx < parent.curr_size() {
+                let mut right_guard = self.bpm.write_page(*parent.value_at(right_sibling_idx))?;
+                let mut right_page = Self::leaf_page_mut(right_guard.data_mut());
 
-            if Self::try_borrow_from_right_leaf(
-                &mut parent,
-                right_sibling_idx,
-                &mut leaf,
-                &mut sibling_page,
-            ) {
-                return Ok(());
+                if Self::choose_leaf_pair_action(&leaf, &right_page) == LeafPairAction::Redistribute
+                {
+                    Self::redistribute_leaf_pair(
+                        &mut parent,
+                        &mut leaf,
+                        &mut right_page,
+                        right_sibling_idx,
+                    );
+                    return Ok(());
+                }
             }
-        }
 
-        // Try merging with leaf sibling
-        if let Some(left_sibling_idx) = left_sibling_idx {
-            let mut sibling_guard = self.bpm.write_page(*parent.value_at(left_sibling_idx))?;
-            let mut sibling_page = Self::leaf_page_mut(sibling_guard.data_mut());
-            if Self::can_merge_right_into_leaf(&sibling_page, &leaf) {
-                sibling_page.coalesce_right_into_page(&mut leaf);
-                parent.remove_at(leaf_idx);
-                drop(leaf_guard);
-                drop(sibling_guard);
-                self.bpm.delete_page(leaf_page_id)?;
-
-                return self.propagate_parent_underflow(ctx);
+            if let Some(left_sibling_idx) = left_sibling_idx {
+                let mut left_guard = self.bpm.write_page(*parent.value_at(left_sibling_idx))?;
+                let mut left_page = Self::leaf_page_mut(left_guard.data_mut());
+                Self::merge_leaf_pair(&mut parent, &mut left_page, &mut leaf, leaf_idx);
+                leaf_page_id
+            } else {
+                assert!(right_sibling_idx < parent.curr_size());
+                let mut right_guard = self.bpm.write_page(*parent.value_at(right_sibling_idx))?;
+                let right_page_id = right_guard.page_id();
+                let mut right_page = Self::leaf_page_mut(right_guard.data_mut());
+                Self::merge_leaf_pair(&mut parent, &mut leaf, &mut right_page, right_sibling_idx);
+                right_page_id
             }
-        }
+        };
 
-        // Try merging with right sibling
-        if right_sibling_idx < parent.curr_size() {
-            let mut sibling_guard = self.bpm.write_page(*parent.value_at(right_sibling_idx))?;
-            let sibling_page_id = sibling_guard.page_id();
-            let mut sibling_page = Self::leaf_page_mut(sibling_guard.data_mut());
-
-            if Self::can_merge_right_into_leaf(&leaf, &sibling_page) {
-                leaf.coalesce_right_into_page(&mut sibling_page);
-                parent.remove_at(right_sibling_idx);
-                drop(leaf_guard);
-                drop(sibling_guard);
-
-                self.bpm.delete_page(sibling_page_id)?;
-
-                return self.propagate_parent_underflow(ctx);
-            }
-        }
-
-        panic!("delete rebalancing invariant violated: neither sibling can lend or merge")
+        drop(leaf);
+        drop(leaf_guard);
+        self.bpm.delete_page(deleted_page_id)?;
+        self.propagate_parent_underflow(ctx)
     }
 
     fn propagate_parent_underflow(&self, ctx: BTreeContext) -> Result<(), BTreeError> {
@@ -689,6 +682,48 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         let right_sep_value = *right.rid_ref(0);
 
         parent.set_index_key_at(right_idx, &right_sep_key, &right_sep_value);
+    }
+
+    fn merge_leaf_pair(
+        parent: &mut BTreeInternalPageMut<'_, K>,
+        left: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>,
+        right: &mut BTreeLeafPageMut<'_, K, TOMB_CAP>,
+        right_idx: usize,
+    ) {
+        let total_live_size = left.live_size() + right.live_size();
+        assert!(total_live_size <= left.max_size());
+        let num_retained_tombstones = left.min_size().saturating_sub(total_live_size);
+        let mut curr_tombstone_count = left.get_tombstone_count() + right.get_tombstone_count();
+
+        while curr_tombstone_count > num_retained_tombstones && left.get_tombstone_count() > 0 {
+            left.evict_oldest_tombstone();
+            curr_tombstone_count -= 1;
+        }
+
+        while curr_tombstone_count > num_retained_tombstones && right.get_tombstone_count() > 0 {
+            right.evict_oldest_tombstone();
+            curr_tombstone_count -= 1;
+        }
+
+        assert_eq!(curr_tombstone_count, num_retained_tombstones);
+
+        left.coalesce_right_into_page(right);
+
+        assert!(left.curr_size() >= left.min_size());
+
+        parent.remove_at(right_idx);
+        left.set_next_page_id(right.get_next_page_id());
+    }
+
+    fn choose_leaf_pair_action(
+        left: &BTreeLeafPageMut<'_, K, TOMB_CAP>,
+        right: &BTreeLeafPageMut<'_, K, TOMB_CAP>,
+    ) -> LeafPairAction {
+        if left.live_size() + right.live_size() > left.max_size() {
+            LeafPairAction::Redistribute
+        } else {
+            LeafPairAction::Merge
+        }
     }
 
     fn try_borrow_from_left_leaf(
@@ -811,6 +846,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         &self,
         ctx: &mut BTreeContext<'a>,
         key: K,
+        value: Rid,
     ) -> Result<(), BTreeError> {
         todo!()
     }
@@ -819,6 +855,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         &self,
         ctx: &mut BTreeContext<'a>,
         key: K,
+        value: Rid,
     ) -> Result<(), BTreeError> {
         todo!()
     }
