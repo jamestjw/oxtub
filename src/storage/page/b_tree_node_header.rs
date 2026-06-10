@@ -38,6 +38,10 @@ impl BTreeNodeHeader {
         self.current_size = size as u16;
     }
 
+    pub fn curr_size(&self) -> usize {
+        self.current_size as usize
+    }
+
     pub fn is_insert_safe(&self) -> bool {
         if self.is_leaf() {
             self.current_size + 1 < self.max_size

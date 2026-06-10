@@ -672,8 +672,126 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         self.propagate_parent_underflow(ctx)
     }
 
-    fn propagate_parent_underflow(&self, ctx: BTreeContext) -> Result<(), BTreeError> {
-        todo!()
+    fn propagate_parent_underflow(&self, mut ctx: BTreeContext) -> Result<(), BTreeError> {
+        assert!(
+            !ctx.write_set.is_empty(),
+            "should have at least 1 internal page"
+        );
+
+        while !ctx.write_set.is_empty() {
+            let mut page_guard = ctx.write_set.pop().unwrap();
+            let page_id = page_guard.page_id();
+
+            if ctx.is_root(page_id) {
+                let should_shrink = Self::internal_page(page_guard.data()).curr_size() == 1;
+                if should_shrink {
+                    self.shrink_root_internal_page(ctx, page_guard)?;
+                }
+                return Ok(());
+            }
+
+            let mut internal_page = Self::internal_page_mut(page_guard.data_mut());
+
+            if internal_page.curr_size() >= internal_page.min_size() {
+                return Ok(());
+            }
+
+            assert!(
+                !ctx.write_set.is_empty(),
+                "Underfull non-root internal must have a parent",
+            );
+
+            let mut parent_guard = ctx.write_set.last_mut().unwrap();
+            let mut parent = Self::internal_page_mut(parent_guard.data_mut());
+            let idx_within_parent = parent.value_idx(&page_id).expect("child must be in parent");
+
+            // Try redistributing by borrowing from left
+            if idx_within_parent >= 1 {
+                let left_idx = idx_within_parent - 1;
+                let mut left_guard = self.bpm.write_page(*parent.value_at(left_idx))?;
+                let mut left = Self::internal_page_mut(left_guard.data_mut());
+
+                if Self::try_redistribute_internal_pair(
+                    &mut parent,
+                    &mut left,
+                    &mut internal_page,
+                    idx_within_parent,
+                ) {
+                    return Ok(());
+                }
+            }
+
+            // Try borrowing from right
+            if idx_within_parent < parent.curr_size() - 1 {
+                let right_idx = idx_within_parent + 1;
+                let mut right_guard = self.bpm.write_page(*parent.value_at(right_idx))?;
+                let mut right = Self::internal_page_mut(right_guard.data_mut());
+
+                if Self::try_redistribute_internal_pair(
+                    &mut parent,
+                    &mut internal_page,
+                    &mut right,
+                    right_idx,
+                ) {
+                    return Ok(());
+                }
+            }
+
+            todo!("try merging with left and right sibling");
+
+            unreachable!("should not get here")
+        }
+
+        Ok(())
+    }
+
+    fn try_redistribute_internal_pair(
+        parent: &mut BTreeInternalPageMut<'_, K>,
+        left: &mut BTreeInternalPageMut<'_, K>,
+        right: &mut BTreeInternalPageMut<'_, K>,
+        right_idx: usize,
+    ) -> bool {
+        if left.curr_size() < left.min_size() && right.curr_size() > right.min_size() {
+            // borrow one from right into left
+            todo!()
+        } else if right.curr_size() < right.min_size() && left.curr_size() > left.min_size() {
+            // borrow one from left into right
+            todo!()
+        } else {
+            false
+        }
+    }
+
+    fn shrink_root_internal_page(
+        &self,
+        mut ctx: BTreeContext,
+        mut root_page_guard: WritePageGuard<'_>,
+    ) -> Result<(), BTreeError> {
+        let root_page_id = root_page_guard.page_id();
+        let mut root = Self::internal_page_mut(root_page_guard.data_mut());
+
+        debug_assert_eq!(root.curr_size(), 1);
+
+        let mut header_guard = ctx.header.unwrap();
+        let mut header_page = BTreeRootPageMut::from_data(header_guard.data_mut());
+        let new_root_page_id = *root.value_at(0);
+        let child_is_empty_leaf = {
+            let child_guard = self.bpm.write_page(new_root_page_id)?;
+            let child_page = BTreeNodeHeader::from_data(child_guard.data());
+            child_page.is_leaf() && child_page.curr_size() == 0
+        };
+
+        if child_is_empty_leaf {
+            self.bpm.delete_page(new_root_page_id)?;
+            header_page.set_root_page_id(INVALID_PAGE_ID);
+        } else {
+            header_page.set_root_page_id(new_root_page_id);
+        }
+
+        drop(root_page_guard);
+        self.bpm.delete_page(root_page_id)?;
+
+        Ok(())
     }
 
     fn redistribute_leaf_pair(
