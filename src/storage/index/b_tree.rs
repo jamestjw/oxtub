@@ -737,12 +737,73 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
                 }
             }
 
-            todo!("try merging with left and right sibling");
+            // Try merging with left
+            if idx_within_parent >= 1 {
+                let left_idx = idx_within_parent - 1;
+                let mut left_guard = self.bpm.write_page(*parent.value_at(left_idx))?;
+                let mut left = Self::internal_page_mut(left_guard.data_mut());
 
-            unreachable!("should not get here")
+                Self::merge_internal_right_into_left(
+                    &mut parent,
+                    &mut left,
+                    &mut internal_page,
+                    idx_within_parent,
+                );
+
+                drop(page_guard);
+                self.bpm.delete_page(page_id)?;
+                continue;
+            }
+
+            assert!(
+                idx_within_parent < parent.curr_size() - 1,
+                "must have right internal to merge with"
+            );
+
+            let right_idx = idx_within_parent + 1;
+            let mut right_guard = self.bpm.write_page(*parent.value_at(right_idx))?;
+            let dead_right_page_id = right_guard.page_id();
+            let mut right = Self::internal_page_mut(right_guard.data_mut());
+
+            Self::merge_internal_right_into_left(
+                &mut parent,
+                &mut internal_page,
+                &mut right,
+                right_idx,
+            );
+            drop(right_guard);
+            self.bpm.delete_page(dead_right_page_id)?;
         }
 
         Ok(())
+    }
+
+    fn merge_internal_right_into_left(
+        parent: &mut BTreeInternalPageMut<'_, K>,
+        left: &mut BTreeInternalPageMut<'_, K>,
+        right: &mut BTreeInternalPageMut<'_, K>,
+        right_idx: usize,
+    ) {
+        let left_size = left.curr_size();
+        let right_size = right.curr_size();
+
+        debug_assert!(right_idx > 0 && left_size + right_size <= left.max_size());
+
+        left.set_index_key_at(
+            left_size,
+            parent.key_at(right_idx),
+            parent.rid_at(right_idx),
+        );
+        left.set_value_at(left_size, *right.value_at(0));
+
+        for idx in 1..right_size {
+            left.set_index_key_at(left_size + idx, right.key_at(idx), right.rid_at(idx));
+            left.set_value_at(left_size + idx, *right.value_at(idx));
+        }
+
+        left.set_size(left_size + right_size);
+
+        parent.remove_at(right_idx);
     }
 
     fn try_redistribute_internal_pair(
