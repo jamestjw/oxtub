@@ -1227,8 +1227,16 @@ mod tests {
 
     struct U64Comparator;
 
+    struct I64Comparator;
+
     impl KeyComparator<u64> for U64Comparator {
         fn compare(&self, a: &u64, b: &u64) -> Ordering {
+            a.cmp(b)
+        }
+    }
+
+    impl KeyComparator<i64> for I64Comparator {
+        fn compare(&self, a: &i64, b: &i64) -> Ordering {
             a.cmp(b)
         }
     }
@@ -1246,9 +1254,63 @@ mod tests {
         )
     }
 
+    fn rid_for_i64_key(key: i64) -> Rid {
+        Rid::new((key >> 32) as PageId, (key as u64 & 0xffff) as usize)
+    }
+
+    fn assert_i64_tree_matches<const TOMB_CAP: usize>(
+        tree: &BTree<'_, i64, I64Comparator, TOMB_CAP>,
+        live_keys: &[i64],
+        deleted_keys: &[i64],
+    ) {
+        for key in live_keys {
+            assert_eq!(tree.get_values(key).unwrap(), vec![rid_for_i64_key(*key)]);
+        }
+
+        for key in deleted_keys {
+            assert!(tree.get_values(key).unwrap().is_empty());
+        }
+
+        let mut expected_keys = live_keys.to_vec();
+        expected_keys.sort();
+        let expected: Vec<_> = expected_keys
+            .into_iter()
+            .map(|key| (key, rid_for_i64_key(key)))
+            .collect();
+        assert_eq!(tree.iter().collect::<Vec<_>>(), expected);
+    }
+
     fn root_page_id(bpm: &BufferPoolManager, header_page_id: PageId) -> PageId {
         let header_guard = bpm.read_page(header_page_id).unwrap();
         BTreeRootPage::from_data(header_guard.data()).root_page_id()
+    }
+
+    fn tree_height(bpm: &BufferPoolManager, root_page_id: PageId) -> usize {
+        if root_page_id == INVALID_PAGE_ID {
+            return 0;
+        }
+
+        let mut height = 1;
+        let mut current_page_id = root_page_id;
+
+        loop {
+            let current_guard = bpm.read_page(current_page_id).unwrap();
+            if BTreeNodeHeader::from_data(current_guard.data()).is_leaf() {
+                return height;
+            }
+
+            let internal_page = BTreeInternalPage::<u64>::from_data(current_guard.data());
+            current_page_id = *internal_page.value_at(0);
+            height += 1;
+        }
+    }
+
+    fn assert_u64_tree_contains_range<const TOMB_CAP: usize>(
+        tree: &BTree<'_, u64, U64Comparator, TOMB_CAP>,
+        range: std::ops::Range<u64>,
+    ) {
+        let expected: Vec<_> = range.map(|key| (key, rid_for_key(key))).collect();
+        assert_eq!(tree.iter().collect::<Vec<_>>(), expected);
     }
 
     fn find_insert_safe_leaf_key<const TOMB_CAP: usize>(
@@ -1273,6 +1335,39 @@ mod tests {
 
             if leaf.curr_size() > 0 && leaf.curr_size() + 1 < leaf.max_size() {
                 return Some(*leaf.key_at(0) + 1);
+            }
+
+            let next_page_id = leaf.get_next_page_id();
+            if next_page_id == INVALID_PAGE_ID {
+                return None;
+            }
+
+            current_page_id = next_page_id;
+        }
+    }
+
+    fn find_delete_safe_leaf_key<const TOMB_CAP: usize>(
+        bpm: &BufferPoolManager,
+        root_page_id: PageId,
+    ) -> Option<u64> {
+        let mut current_page_id = root_page_id;
+
+        loop {
+            let current_guard = bpm.read_page(current_page_id).unwrap();
+            if BTreeNodeHeader::from_data(current_guard.data()).is_leaf() {
+                break;
+            }
+
+            let internal_page = BTreeInternalPage::<u64>::from_data(current_guard.data());
+            current_page_id = *internal_page.value_at(0);
+        }
+
+        loop {
+            let leaf_guard = bpm.read_page(current_page_id).unwrap();
+            let leaf = BTreeLeafPage::<u64, TOMB_CAP>::from_data(leaf_guard.data());
+
+            if leaf.curr_size() > leaf.min_size() {
+                return Some(*leaf.key_at(0));
             }
 
             let next_page_id = leaf.get_next_page_id();
@@ -1325,6 +1420,151 @@ mod tests {
             let rids = tree.get_values(&key).unwrap();
             assert_eq!(rids, vec![rid_for_key(key)]);
         }
+    }
+
+    #[test]
+    fn delete_test_no_iterator_removes_all_and_resets_root() {
+        const TOMB_CAP: usize = 0;
+
+        let bpm = setup_bpm(50);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        let keys = [1, 2, 3, 4, 5];
+        for key in keys {
+            tree.insert(key, rid_for_key(key)).unwrap();
+        }
+
+        for key in keys {
+            assert_eq!(tree.get_values(&key).unwrap(), vec![rid_for_key(key)]);
+        }
+
+        let remove_keys = [1, 5, 3, 4];
+        for key in remove_keys {
+            tree.remove(key, rid_for_key(key)).unwrap();
+        }
+
+        for key in keys {
+            let values = tree.get_values(&key).unwrap();
+            if remove_keys.contains(&key) {
+                assert!(values.is_empty());
+            } else {
+                assert_eq!(values, vec![rid_for_key(key)]);
+            }
+        }
+
+        let remaining: Vec<_> = tree.iter().collect();
+        assert_eq!(remaining, vec![(2, rid_for_key(2))]);
+
+        tree.remove(2, rid_for_key(2)).unwrap();
+        assert_eq!(root_page_id(&bpm, header_page_id), INVALID_PAGE_ID);
+        assert!(tree.is_empty().unwrap());
+    }
+
+    #[test]
+    fn optimistic_delete_writes_only_target_leaf() {
+        const TOMB_CAP: usize = 0;
+
+        let bpm = setup_bpm(50);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        let num_keys = BTreeLeafPageMut::<u64, TOMB_CAP>::MAX_SIZE * 2;
+        for key in 0..num_keys as u64 {
+            tree.insert(key, rid_for_key(key)).unwrap();
+        }
+
+        let root_page = root_page_id(&bpm, header_page_id);
+        let to_delete = find_delete_safe_leaf_key::<TOMB_CAP>(&bpm, root_page)
+            .expect("expected a delete-safe leaf");
+
+        let base_reads = bpm.read_count();
+        let base_writes = bpm.write_count();
+
+        tree.remove(to_delete, rid_for_key(to_delete)).unwrap();
+
+        assert!(bpm.read_count() - base_reads > 0);
+        assert_eq!(bpm.write_count() - base_writes, 1);
+        assert!(tree.get_values(&to_delete).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sequential_edge_mix_delete_and_reinsert() {
+        const TOMB_CAP: usize = 0;
+
+        let bpm = setup_bpm(50);
+        let header_page_id = bpm.new_page();
+        let comparator = I64Comparator;
+        let tree = BTree::<i64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        let keys = [1, 5, 15, 20, 25, 2, -1, -2, 6, 14, 4];
+        let mut inserted = Vec::new();
+        let mut deleted = Vec::new();
+
+        for key in keys {
+            tree.insert(key, rid_for_i64_key(key)).unwrap();
+            inserted.push(key);
+            assert_i64_tree_matches(&tree, &inserted, &deleted);
+        }
+
+        tree.remove(1, rid_for_i64_key(1)).unwrap();
+        deleted.push(1);
+        inserted.retain(|key| *key != 1);
+        assert_i64_tree_matches(&tree, &inserted, &deleted);
+
+        tree.insert(3, rid_for_i64_key(3)).unwrap();
+        inserted.push(3);
+        assert_i64_tree_matches(&tree, &inserted, &deleted);
+
+        let delete_order = [4, 14, 6, 2, 15, -2, -1, 3, 5, 25, 20];
+        for key in delete_order {
+            tree.remove(key, rid_for_i64_key(key)).unwrap();
+            deleted.push(key);
+            inserted.retain(|inserted_key| *inserted_key != key);
+            assert_i64_tree_matches(&tree, &inserted, &deleted);
+        }
+    }
+
+    #[test]
+    fn multi_level_delete_rebalances_and_shrinks_root() {
+        const TOMB_CAP: usize = 0;
+        const LEAF_MULTIPLIER: usize = 500;
+
+        let bpm = setup_bpm(1_000);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+
+        let num_keys = (BTreeLeafPageMut::<u64, TOMB_CAP>::MAX_SIZE * LEAF_MULTIPLIER) as u64;
+        for key in (0..num_keys).rev() {
+            tree.insert(key, rid_for_key(key)).unwrap();
+        }
+
+        let root_page = root_page_id(&bpm, header_page_id);
+        let initial_height = tree_height(&bpm, root_page);
+        assert!(initial_height >= 3, "test must exercise a multi-level tree");
+        assert_u64_tree_contains_range(&tree, 0..num_keys);
+
+        let first_checkpoint = num_keys / 4;
+        for key in 0..first_checkpoint {
+            tree.remove(key, rid_for_key(key)).unwrap();
+        }
+        assert_u64_tree_contains_range(&tree, first_checkpoint..num_keys);
+
+        let second_checkpoint = num_keys / 2;
+        for key in first_checkpoint..second_checkpoint {
+            tree.remove(key, rid_for_key(key)).unwrap();
+        }
+        assert_u64_tree_contains_range(&tree, second_checkpoint..num_keys);
+
+        for key in second_checkpoint..num_keys {
+            tree.remove(key, rid_for_key(key)).unwrap();
+        }
+
+        assert_eq!(root_page_id(&bpm, header_page_id), INVALID_PAGE_ID);
+        assert!(tree.is_empty().unwrap());
     }
 
     #[test]

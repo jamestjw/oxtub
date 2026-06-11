@@ -250,6 +250,10 @@ impl<'a, K: Pod + Copy, const TOMB_CAP: usize> BTreeLeafPage<'a, K, TOMB_CAP> {
         self.view.curr_size()
     }
 
+    pub fn min_size(&self) -> usize {
+        self.view.min_size()
+    }
+
     pub fn get_tombstoned_keys(&self) -> Vec<K> {
         self.view.get_tombstoned_keys()
     }
