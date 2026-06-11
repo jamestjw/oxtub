@@ -1214,11 +1214,15 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
 
         IndexIterator::new_at(self.bpm, Some(curr_page_guard), idx)
     }
+
+    pub fn size(&self) -> usize {
+        self.iter().count()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cmp::Ordering, path::PathBuf};
+    use std::{cmp::Ordering, path::PathBuf, sync::Arc};
 
     use tempfile::NamedTempFile;
 
@@ -1743,5 +1747,82 @@ mod tests {
         assert!(bpm.read_count() - base_reads > 0);
         assert_eq!(bpm.write_count() - base_writes, 1);
         assert_eq!(tree.get_values(&to_insert).unwrap(), vec![rid]);
+    }
+
+    /*
+     * Concurrency tests
+     */
+    fn run_parallel<F, B, T>(num_threads: usize, f: F, tree: B, args: T)
+    where
+        F: Fn(usize, B, T) + Send + Sync,
+        B: Clone + Send,
+        T: Clone + Send,
+    {
+        std::thread::scope(|scope| {
+            for i in 0..num_threads {
+                let args_clone = args.clone();
+                let tree_clone = tree.clone();
+                let f = &f;
+
+                scope.spawn(move || {
+                    f(i, tree_clone, args_clone);
+                });
+            }
+        });
+    }
+
+    fn insert_keys_allow_duplicates<const TOMB_CAP: usize>(
+        _thread_idx: usize,
+        tree: Arc<BTree<'_, u64, U64Comparator, TOMB_CAP>>,
+        keys: Vec<u64>,
+    ) {
+        for key in keys {
+            match tree.insert(key, rid_for_key(key)) {
+                Ok(()) | Err(BTreeError::Duplicate) => {}
+                Err(err) => panic!("unexpected insert error: {err:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_insert_test() {
+        const TOMB_CAP: usize = 0;
+
+        let bpm = setup_bpm(100);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+        let tree = Arc::new(tree);
+
+        let mut keys_to_insert = vec![];
+        let scale_factor = 100;
+
+        for i in 1..scale_factor {
+            keys_to_insert.push(i);
+        }
+
+        run_parallel(
+            2,
+            insert_keys_allow_duplicates,
+            tree.clone(),
+            keys_to_insert.clone(),
+        );
+
+        assert_eq!(tree.size(), keys_to_insert.len());
+
+        for key in keys_to_insert.iter() {
+            assert_eq!(tree.get_values(key).unwrap(), vec![rid_for_key(*key)]);
+        }
+
+        let mut current_key = 1;
+
+        for (key, rid) in tree.iter() {
+            assert_eq!(rid.page_id, 0);
+            assert_eq!(rid.slot_id, current_key);
+            assert_eq!(key, current_key.into());
+            current_key += 1;
+        }
+
+        assert_eq!(keys_to_insert.len() + 1, current_key.into());
     }
 }
