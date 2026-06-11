@@ -751,12 +751,61 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         right: &mut BTreeInternalPageMut<'_, K>,
         right_idx: usize,
     ) -> bool {
+        debug_assert_ne!(right_idx, 0);
+
         if left.curr_size() < left.min_size() && right.curr_size() > right.min_size() {
-            // borrow one from right into left
-            todo!()
+            // Borrow one from right into left
+
+            let append_idx = left.curr_size();
+            left.set_index_key_at(
+                append_idx,
+                parent.key_at(right_idx),
+                parent.rid_at(right_idx),
+            );
+            left.set_value_at(append_idx, *right.value_at(0));
+            left.set_size(append_idx + 1);
+
+            parent.set_index_key_at(right_idx, right.key_at(1), right.rid_at(1));
+
+            let right_initial_size = right.curr_size();
+            right.set_value_at(0, *right.value_at(1));
+            for idx in 1..(right_initial_size - 1) {
+                let key = *right.key_at(idx + 1);
+                let rid = *right.rid_at(idx + 1);
+                let value = *right.value_at(idx + 1);
+                right.set_index_key_at(idx, &key, &rid);
+                right.set_value_at(idx, value);
+            }
+            right.set_size(right_initial_size - 1);
+
+            true
         } else if right.curr_size() < right.min_size() && left.curr_size() > left.min_size() {
-            // borrow one from left into right
-            todo!()
+            // Borrow one from left into right
+
+            // Shift all entries to the right by 1
+            let initial_right_size = right.curr_size();
+            for idx in (1..=initial_right_size).rev() {
+                right.set_value_at(idx, *right.value_at(idx - 1));
+                if idx > 1 {
+                    let key = *right.key_at(idx - 1);
+                    let rid = *right.rid_at(idx - 1);
+                    right.set_index_key_at(idx, &key, &rid);
+                }
+            }
+
+            let left_last_idx = left.curr_size() - 1;
+            right.set_value_at(0, *left.value_at(left_last_idx));
+            right.set_index_key_at(1, parent.key_at(right_idx), parent.rid_at(right_idx));
+            right.set_size(initial_right_size + 1);
+
+            parent.set_index_key_at(
+                right_idx,
+                left.key_at(left_last_idx),
+                left.rid_at(left_last_idx),
+            );
+            left.set_size(left_last_idx);
+
+            true
         } else {
             false
         }
