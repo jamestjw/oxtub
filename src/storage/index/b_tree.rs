@@ -92,6 +92,8 @@ where
     bpm: &'a BufferPoolManager,
     header_page_id: PageId,
     comparator: &'a C,
+    leaf_max_size: usize,
+    internal_max_size: usize,
     _marker: PhantomData<K>,
 }
 
@@ -99,10 +101,33 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
     BTree<'a, K, C, TOMB_CAP>
 {
     pub fn new(bpm: &'a BufferPoolManager, header_page_id: PageId, comparator: &'a C) -> Self {
+        Self::new_with_page_sizes(
+            bpm,
+            header_page_id,
+            comparator,
+            BTreeLeafPageMut::<K, TOMB_CAP>::MAX_SIZE,
+            BTreeInternalPageMut::<K>::MAX_SIZE,
+        )
+    }
+
+    pub fn new_with_page_sizes(
+        bpm: &'a BufferPoolManager,
+        header_page_id: PageId,
+        comparator: &'a C,
+        leaf_max_size: usize,
+        internal_max_size: usize,
+    ) -> Self {
+        assert!(leaf_max_size >= 2);
+        assert!(leaf_max_size <= BTreeLeafPageMut::<K, TOMB_CAP>::MAX_SIZE);
+        assert!(internal_max_size >= 2);
+        assert!(internal_max_size <= BTreeInternalPageMut::<K>::MAX_SIZE);
+
         let btree = Self {
             bpm,
             header_page_id,
             comparator,
+            leaf_max_size,
+            internal_max_size,
             _marker: PhantomData,
         };
 
@@ -138,8 +163,11 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         BTreeInternalPageMut::from_data(data)
     }
 
-    fn init_internal_page<'page>(data: &'page mut PageBytes) -> BTreeInternalPageMut<'page, K> {
-        BTreeInternalPageMut::init(data)
+    fn init_internal_page<'page>(
+        &self,
+        data: &'page mut PageBytes,
+    ) -> BTreeInternalPageMut<'page, K> {
+        BTreeInternalPageMut::init_with_max_size(data, self.internal_max_size)
     }
 
     fn leaf_page<'page>(data: &'page PageBytes) -> BTreeLeafPage<'page, K, TOMB_CAP> {
@@ -150,8 +178,11 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         BTreeLeafPageMut::from_data(data)
     }
 
-    fn init_leaf_page<'page>(data: &'page mut PageBytes) -> BTreeLeafPageMut<'page, K, TOMB_CAP> {
-        BTreeLeafPageMut::init(data)
+    fn init_leaf_page<'page>(
+        &self,
+        data: &'page mut PageBytes,
+    ) -> BTreeLeafPageMut<'page, K, TOMB_CAP> {
+        BTreeLeafPageMut::init_with_max_size(data, self.leaf_max_size)
     }
 
     pub fn is_empty(&self) -> Result<bool, BTreeError> {
@@ -275,7 +306,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
 
             // Could populate the context but it's kind of useless
             let mut new_root_guard = self.bpm.write_page(new_page_id)?;
-            let mut new_root = Self::init_leaf_page(new_root_guard.data_mut());
+            let mut new_root = self.init_leaf_page(new_root_guard.data_mut());
             new_root.insert_at(0, &key, &value);
 
             return Ok(());
@@ -313,7 +344,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
         if leaf_page.curr_size() == leaf_page.max_size() {
             let sibling_page_id = self.bpm.new_page();
             let mut sibling_guard = self.bpm.write_page(sibling_page_id)?;
-            let mut sibling_leaf = Self::init_leaf_page(sibling_guard.data_mut());
+            let mut sibling_leaf = self.init_leaf_page(sibling_guard.data_mut());
             sibling_leaf.set_next_page_id(leaf_page.get_next_page_id());
 
             let split_idx = leaf_page.min_size();
@@ -466,7 +497,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
                 assert!(ctx.is_root(left_child_id));
                 let new_root_page_id = self.bpm.new_page();
                 let mut new_root_guard = self.bpm.write_page(new_root_page_id)?;
-                let mut new_root = Self::init_internal_page(new_root_guard.data_mut());
+                let mut new_root = self.init_internal_page(new_root_guard.data_mut());
                 new_root.set_value_at(0, left_child_id);
                 new_root.set_index_key_at(1, &key_to_insert, &rid_to_insert);
                 new_root.set_value_at(1, new_right_child_id);
@@ -496,7 +527,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
             // Parent has no room, so we need to split the parent
             let parent_sibling_page_id = self.bpm.new_page();
             let mut parent_sibling_guard = self.bpm.write_page(parent_sibling_page_id)?;
-            let mut parent_sibling = Self::init_internal_page(parent_sibling_guard.data_mut());
+            let mut parent_sibling = self.init_internal_page(parent_sibling_guard.data_mut());
             let promoted_key = parent.split_insert_after(
                 &mut parent_sibling,
                 &left_child_id,
@@ -1840,6 +1871,36 @@ mod tests {
         }
     }
 
+    fn delete_keys_allow_not_found<const TOMB_CAP: usize>(
+        _thread_idx: usize,
+        tree: Arc<BTree<'_, u64, U64Comparator, TOMB_CAP>>,
+        keys: Vec<u64>,
+    ) {
+        for key in keys {
+            match tree.remove(key, rid_for_key(key)) {
+                Ok(()) | Err(BTreeError::NotFound) => {}
+                Err(err) => panic!("unexpected insert error: {err:?}"),
+            }
+        }
+    }
+
+    fn delete_keys_separately<const TOMB_CAP: usize>(
+        thread_idx: usize,
+        tree: Arc<BTree<'_, u64, U64Comparator, TOMB_CAP>>,
+        keys: Vec<u64>,
+        total_threads: u64,
+    ) {
+        for &key in keys
+            .iter()
+            .filter(|&k| *k % total_threads == thread_idx as u64)
+        {
+            match tree.remove(key, rid_for_key(key)) {
+                Ok(()) => {}
+                Err(err) => panic!("unexpected insert error: {err:?}"),
+            }
+        }
+    }
+
     #[test]
     fn concurrent_insert_test() {
         const TOMB_CAP: usize = 0;
@@ -1847,7 +1908,15 @@ mod tests {
         let bpm = setup_bpm(100);
         let header_page_id = bpm.new_page();
         let comparator = U64Comparator;
-        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+        let max_leaf_size = 3;
+        let max_internal_size = 5;
+        let tree = BTree::<u64, _, TOMB_CAP>::new_with_page_sizes(
+            &bpm,
+            header_page_id,
+            &comparator,
+            max_leaf_size,
+            max_internal_size,
+        );
         let tree = Arc::new(tree);
 
         let scale_factor = 100;
@@ -1885,7 +1954,15 @@ mod tests {
         let bpm = setup_bpm(100);
         let header_page_id = bpm.new_page();
         let comparator = U64Comparator;
-        let tree = BTree::<u64, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
+        let max_leaf_size = 3;
+        let max_internal_size = 5;
+        let tree = BTree::<u64, _, TOMB_CAP>::new_with_page_sizes(
+            &bpm,
+            header_page_id,
+            &comparator,
+            max_leaf_size,
+            max_internal_size,
+        );
         let tree = Arc::new(tree);
 
         let scale_factor = 1000;
@@ -1915,5 +1992,82 @@ mod tests {
         }
 
         assert_eq!(keys_to_insert.len() + 1, current_key.into());
+    }
+
+    #[test]
+    fn concurrent_delete_test_duplicates() {
+        const TOMB_CAP: usize = 0;
+
+        let bpm = setup_bpm(100);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let max_leaf_size = 3;
+        let max_internal_size = 5;
+        let tree = BTree::<u64, _, TOMB_CAP>::new_with_page_sizes(
+            &bpm,
+            header_page_id,
+            &comparator,
+            max_leaf_size,
+            max_internal_size,
+        );
+        let tree = Arc::new(tree);
+
+        let keys = vec![1, 2, 3, 4, 5];
+
+        insert_keys_allow_duplicates(0, Arc::clone(&tree), keys);
+
+        let keys_to_remove = vec![1, 5, 3, 4];
+
+        run_parallel!(
+            2,
+            delete_keys_allow_not_found,
+            tree.clone(),
+            keys_to_remove.clone(),
+        );
+
+        assert_eq!(tree.iter().collect::<Vec<_>>(), vec![(2, rid_for_key(2))]);
+    }
+
+    #[test]
+    fn concurrent_delete_test_separately() {
+        const TOMB_CAP: usize = 0;
+
+        let bpm = setup_bpm(100);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let max_leaf_size = 3;
+        let max_internal_size = 5;
+        let tree = BTree::<u64, _, TOMB_CAP>::new_with_page_sizes(
+            &bpm,
+            header_page_id,
+            &comparator,
+            max_leaf_size,
+            max_internal_size,
+        );
+        let tree = Arc::new(tree);
+
+        let keys = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        insert_keys_allow_duplicates(0, Arc::clone(&tree), keys);
+
+        let keys_to_remove = vec![1, 4, 3, 2, 5, 6];
+
+        run_parallel!(
+            2,
+            delete_keys_separately,
+            tree.clone(),
+            keys_to_remove.clone(),
+            2
+        );
+
+        assert_eq!(
+            tree.iter().collect::<Vec<_>>(),
+            vec![
+                (7, rid_for_key(7)),
+                (8, rid_for_key(8)),
+                (9, rid_for_key(9)),
+                (10, rid_for_key(10)),
+            ]
+        );
     }
 }

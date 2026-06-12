@@ -257,6 +257,8 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPage<'a, K, PAGE
 }
 
 impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, PAGE_SIZE> {
+    pub const MAX_SIZE: usize = BTreeInternalPageView::<K, PAGE_SIZE>::NUM_SLOTS;
+
     pub fn from_data(data: &'a mut [u8; PAGE_SIZE]) -> Self {
         Self {
             data,
@@ -265,13 +267,17 @@ impl<'a, K: bytemuck::Pod, const PAGE_SIZE: usize> BTreeInternalPageMut<'a, K, P
     }
 
     pub fn init(data: &'a mut [u8; PAGE_SIZE]) -> Self {
+        Self::init_with_max_size(data, Self::MAX_SIZE)
+    }
+
+    pub fn init_with_max_size(data: &'a mut [u8; PAGE_SIZE], max_size: usize) -> Self {
+        assert!(max_size >= 2);
+        assert!(max_size <= Self::MAX_SIZE);
+
         data.fill(0);
 
         let mut page = Self::from_data(data);
-        page.header_mut().init(
-            PAGE_TYPE_INTERNAL,
-            BTreeInternalPageView::<K, PAGE_SIZE>::NUM_SLOTS,
-        );
+        page.header_mut().init(PAGE_TYPE_INTERNAL, max_size);
 
         page
     }

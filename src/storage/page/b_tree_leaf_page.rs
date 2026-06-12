@@ -315,11 +315,18 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
     }
 
     pub fn init(data: &'a mut PageBytes) -> Self {
+        Self::init_with_max_size(data, Self::MAX_SIZE)
+    }
+
+    pub fn init_with_max_size(data: &'a mut PageBytes, max_size: usize) -> Self {
+        assert!(max_size >= 2);
+        assert!(max_size <= Self::MAX_SIZE);
+
         data.fill(0);
 
         let mut page = Self::from_data(data);
         let header = page.header_mut();
-        header.common.init(PAGE_TYPE_LEAF, Self::MAX_SIZE);
+        header.common.init(PAGE_TYPE_LEAF, max_size);
         header.next_page_id = INVALID_PAGE_ID;
         header.num_tombstones = 0;
         header._reserved = 0;
