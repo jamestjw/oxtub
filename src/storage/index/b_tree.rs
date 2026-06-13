@@ -1913,10 +1913,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn concurrent_insert_test() {
-        const TOMB_CAP: usize = 0;
-
+    fn concurrent_insert_test_impl<const TOMB_CAP: usize>() {
         let bpm = setup_bpm(100);
         let header_page_id = bpm.new_page();
         let comparator = U64Comparator;
@@ -1960,9 +1957,12 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_split_insert_test() {
-        const TOMB_CAP: usize = 0;
+    fn concurrent_insert_test() {
+        concurrent_insert_test_impl::<0>();
+        concurrent_insert_test_impl::<3>();
+    }
 
+    fn concurrent_split_insert_test_impl<const TOMB_CAP: usize>() {
         let bpm = setup_bpm(100);
         let header_page_id = bpm.new_page();
         let comparator = U64Comparator;
@@ -2007,9 +2007,12 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_delete_test_duplicates() {
-        const TOMB_CAP: usize = 0;
+    fn concurrent_split_insert_test() {
+        concurrent_split_insert_test_impl::<0>();
+        concurrent_split_insert_test_impl::<3>();
+    }
 
+    fn concurrent_delete_test_duplicates_impl<const TOMB_CAP: usize>() {
         let bpm = setup_bpm(100);
         let header_page_id = bpm.new_page();
         let comparator = U64Comparator;
@@ -2041,9 +2044,12 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_delete_test_separately() {
-        const TOMB_CAP: usize = 0;
+    fn concurrent_delete_test_duplicates() {
+        concurrent_delete_test_duplicates_impl::<0>();
+        concurrent_delete_test_duplicates_impl::<3>();
+    }
 
+    fn concurrent_delete_test_separately_impl<const TOMB_CAP: usize>() {
         let bpm = setup_bpm(100);
         let header_page_id = bpm.new_page();
         let comparator = U64Comparator;
@@ -2084,9 +2090,12 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_mixed_insert_delete() {
-        const TOMB_CAP: usize = 0;
+    fn concurrent_delete_test_separately() {
+        concurrent_delete_test_separately_impl::<0>();
+        concurrent_delete_test_separately_impl::<3>();
+    }
 
+    fn concurrent_mixed_insert_delete_impl<const TOMB_CAP: usize>() {
         let bpm = setup_bpm(100);
         let header_page_id = bpm.new_page();
         let comparator = U64Comparator;
@@ -2130,9 +2139,12 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_mixed_insert_delete_lookups() {
-        const TOMB_CAP: usize = 0;
+    fn concurrent_mixed_insert_delete() {
+        concurrent_mixed_insert_delete_impl::<0>();
+        concurrent_mixed_insert_delete_impl::<3>();
+    }
 
+    fn concurrent_mixed_insert_delete_lookups_impl<const TOMB_CAP: usize>() {
         let bpm = setup_bpm(100);
         let header_page_id = bpm.new_page();
         let comparator = U64Comparator;
@@ -2179,5 +2191,11 @@ mod tests {
                 .map(|&k| { (k, rid_for_key(k)) })
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn concurrent_mixed_insert_delete_lookups() {
+        concurrent_mixed_insert_delete_lookups_impl::<0>();
+        concurrent_mixed_insert_delete_lookups_impl::<3>();
     }
 }
