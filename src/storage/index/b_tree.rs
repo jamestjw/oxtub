@@ -1901,6 +1901,18 @@ mod tests {
         }
     }
 
+    fn lookup_keys<const TOMB_CAP: usize>(
+        tree: Arc<BTree<'_, u64, U64Comparator, TOMB_CAP>>,
+        keys: Vec<u64>,
+    ) {
+        for key in keys {
+            match &tree.get_values(&key).unwrap()[..] {
+                [rid] => assert_eq!(*rid, rid_for_key(key)),
+                _ => panic!("unexpected values"),
+            }
+        }
+    }
+
     #[test]
     fn concurrent_insert_test() {
         const TOMB_CAP: usize = 0;
@@ -2111,6 +2123,58 @@ mod tests {
         assert_eq!(
             tree.iter().collect::<Vec<_>>(),
             for_insert
+                .iter()
+                .map(|&k| { (k, rid_for_key(k)) })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn concurrent_mixed_insert_delete_lookups() {
+        const TOMB_CAP: usize = 0;
+
+        let bpm = setup_bpm(100);
+        let header_page_id = bpm.new_page();
+        let comparator = U64Comparator;
+        let max_leaf_size = 3;
+        let max_internal_size = 5;
+        let tree = BTree::<u64, _, TOMB_CAP>::new_with_page_sizes(
+            &bpm,
+            header_page_id,
+            &comparator,
+            max_leaf_size,
+            max_internal_size,
+        );
+        let tree = Arc::new(tree);
+
+        let total_keys = 1000;
+        let sieve = 10;
+        let preserved_keys: Vec<u64> = (1..=total_keys).filter(|&i| i % sieve == 0).collect();
+        let dynamic_keys: Vec<u64> = (1..=total_keys).filter(|&i| i % sieve != 0).collect();
+
+        insert_keys_allow_duplicates(0, Arc::clone(&tree), preserved_keys.clone());
+
+        run_parallel!(
+            6,
+            |thread_idx, tree, dynamic_keys, preserved_keys| {
+                if thread_idx % 3 == 0 {
+                    insert_keys_allow_duplicates(0, tree, dynamic_keys);
+                } else if thread_idx % 3 == 1 {
+                    delete_keys_allow_not_found(0, tree, dynamic_keys);
+                } else {
+                    lookup_keys(tree, preserved_keys);
+                }
+            },
+            tree.clone(),
+            dynamic_keys.clone(),
+            preserved_keys.clone(),
+        );
+
+        assert_eq!(
+            tree.iter()
+                .filter(|(key, rid)| key % sieve == 0)
+                .collect::<Vec<_>>(),
+            preserved_keys
                 .iter()
                 .map(|&k| { (k, rid_for_key(k)) })
                 .collect::<Vec<_>>()
