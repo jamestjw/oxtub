@@ -1,6 +1,4 @@
-use std::mem::size_of;
-
-use crate::{catalog::column::Column, storage::table::tuple::VarOffset};
+use crate::catalog::column::Column;
 
 pub struct Schema {
     // number of bytes occupied by the fix-length part of the tuple
@@ -25,11 +23,7 @@ impl Schema {
             }
             col.value_offset = curr_offset;
 
-            if col.is_inlined() {
-                curr_offset += col.size();
-            } else {
-                curr_offset += size_of::<VarOffset>();
-            }
+            curr_offset += col.inline_size();
 
             processed_columns.push(col);
         }

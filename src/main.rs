@@ -4,6 +4,7 @@ mod buffer;
 mod catalog;
 mod common;
 mod storage;
+mod types;
 
 fn main() {
     tracing_subscriber::fmt::init();
