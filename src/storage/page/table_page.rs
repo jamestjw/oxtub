@@ -1,8 +1,8 @@
 use std::mem::{align_of, size_of};
 
 use crate::{
-    buffer::page::PageBytes,
-    common::alignment::align_up,
+    buffer::page::{INVALID_PAGE_ID, PageBytes},
+    common::{alignment::align_up, types::PageId},
     storage::{
         disk::config::DEFAULT_PAGE_SIZE,
         table::tuple::{Tuple, TupleMeta},
@@ -141,6 +141,29 @@ impl<'a> TablePageView<'a> {
             last_tuple_info.tuple_offset as usize
         }
     }
+
+    pub fn get_tuple(&self, slot_id: usize) -> (TupleMeta, Tuple) {
+        let tuple_info = self.tuple_infos()[slot_id];
+        let start = tuple_info.tuple_offset as usize;
+        let end = start + tuple_info.tuple_size as usize;
+
+        (
+            tuple_info.tuple_meta,
+            Tuple::from_bytes(self.data[start..end].to_vec()),
+        )
+    }
+}
+
+impl<'a> TablePage<'a> {
+    pub fn from_data(data: &'a PageBytes) -> Self {
+        Self {
+            view: TablePageView { data },
+        }
+    }
+
+    pub fn get_tuple(&self, slot_id: usize) -> (TupleMeta, Tuple) {
+        self.view.get_tuple(slot_id)
+    }
 }
 
 impl<'a> TablePageMut<'a> {
@@ -153,6 +176,7 @@ impl<'a> TablePageMut<'a> {
 
         let mut page = Self::from_data(data);
         let header = page.header_mut();
+        header.next_page_id = INVALID_PAGE_ID;
         header.num_tuples = 0;
         header.num_deleted_tuples = 0;
 
@@ -188,6 +212,10 @@ impl<'a> TablePageMut<'a> {
         self.header_mut().num_deleted_tuples = val as u16;
     }
 
+    pub fn set_next_page_id(&mut self, page_id: PageId) {
+        self.header_mut().next_page_id = page_id;
+    }
+
     fn tuple_infos(&self) -> &[TupleInfo] {
         let start = TablePageView::TUPLE_INFOS_OFFSET;
         let end = start + self.view().num_tuples() * size_of::<TupleInfo>();
@@ -207,13 +235,13 @@ impl<'a> TablePageMut<'a> {
         self.header_mut().num_tuples += 1;
     }
 
-    pub fn insert_tuple(&mut self, meta: TupleMeta, tuple: &Tuple) -> Option<u16> {
+    pub fn insert_tuple(&mut self, meta: &TupleMeta, tuple: &Tuple) -> Option<u16> {
         let tuple_size = tuple.size();
         let slot_id = self.num_tuples() as u16;
         if size_of::<TupleInfo>() + tuple_size <= self.free_space_end() - self.free_space_start() {
             let tuple_offset = self.free_space_end() - tuple_size;
             self.data[tuple_offset..tuple_offset + tuple_size].copy_from_slice(tuple.data());
-            self.append_tuple_info(TupleInfo::new(tuple_offset, tuple_size, meta));
+            self.append_tuple_info(TupleInfo::new(tuple_offset, tuple_size, meta.clone()));
 
             if meta.is_deleted() {
                 self.set_num_deleted_tuples(self.num_deleted_tuples() + 1);
@@ -287,22 +315,44 @@ mod tests {
         let meta1 = TupleMeta::new(22, false);
         let tuple1 = Tuple::from_bytes(vec![9, 8, 7]);
 
-        assert_eq!(page.insert_tuple(meta0, &tuple0), Some(0));
-        assert_eq!(page.insert_tuple(meta1, &tuple1), Some(1));
+        assert_eq!(page.insert_tuple(&meta0, &tuple0), Some(0));
+        assert_eq!(page.insert_tuple(&meta1, &tuple1), Some(1));
 
         assert_eq!(page.num_tuples(), 2);
         assert_eq!(page.num_deleted_tuples(), 0);
-        assert_eq!(page.free_space_start(), TablePageView::TUPLE_INFOS_OFFSET + 2 * size_of::<TupleInfo>());
-        assert_eq!(page.free_space_end(), DEFAULT_PAGE_SIZE - tuple0.size() - tuple1.size());
+        assert_eq!(
+            page.free_space_start(),
+            TablePageView::TUPLE_INFOS_OFFSET + 2 * size_of::<TupleInfo>()
+        );
+        assert_eq!(
+            page.free_space_end(),
+            DEFAULT_PAGE_SIZE - tuple0.size() - tuple1.size()
+        );
 
         let tuple_infos = page.tuple_infos();
-        assert_eq!(tuple_infos[0], TupleInfo::new(DEFAULT_PAGE_SIZE - tuple0.size(), tuple0.size(), meta0));
-        assert_eq!(tuple_infos[1], TupleInfo::new(DEFAULT_PAGE_SIZE - tuple0.size() - tuple1.size(), tuple1.size(), meta1));
+        assert_eq!(
+            tuple_infos[0],
+            TupleInfo::new(DEFAULT_PAGE_SIZE - tuple0.size(), tuple0.size(), meta0)
+        );
+        assert_eq!(
+            tuple_infos[1],
+            TupleInfo::new(
+                DEFAULT_PAGE_SIZE - tuple0.size() - tuple1.size(),
+                tuple1.size(),
+                meta1
+            )
+        );
 
         let tuple0_offset = tuple_infos[0].tuple_offset as usize;
         let tuple1_offset = tuple_infos[1].tuple_offset as usize;
-        assert_eq!(&page.data[tuple0_offset..tuple0_offset + tuple0.size()], tuple0.data());
-        assert_eq!(&page.data[tuple1_offset..tuple1_offset + tuple1.size()], tuple1.data());
+        assert_eq!(
+            &page.data[tuple0_offset..tuple0_offset + tuple0.size()],
+            tuple0.data()
+        );
+        assert_eq!(
+            &page.data[tuple1_offset..tuple1_offset + tuple1.size()],
+            tuple1.data()
+        );
     }
 
     #[test]
@@ -311,7 +361,7 @@ mod tests {
         let mut page = TablePageMut::init(&mut data);
         let tuple = Tuple::from_bytes(vec![1, 2, 3]);
 
-        assert_eq!(page.insert_tuple(TupleMeta::new(1, true), &tuple), Some(0));
+        assert_eq!(page.insert_tuple(&TupleMeta::new(1, true), &tuple), Some(0));
         assert_eq!(page.num_deleted_tuples(), 1);
 
         page.update_tuple_meta(0, TupleMeta::new(2, false));
@@ -327,7 +377,7 @@ mod tests {
         let mut page = TablePageMut::init(&mut data);
         let tuple = Tuple::from_bytes(vec![0; DEFAULT_PAGE_SIZE]);
 
-        assert_eq!(page.insert_tuple(TupleMeta::new(1, false), &tuple), None);
+        assert_eq!(page.insert_tuple(&TupleMeta::new(1, false), &tuple), None);
         assert_eq!(page.num_tuples(), 0);
         assert_eq!(page.num_deleted_tuples(), 0);
         assert_eq!(page.free_space_start(), TablePageView::TUPLE_INFOS_OFFSET);
@@ -338,11 +388,18 @@ mod tests {
     fn insert_tuple_can_exactly_fill_free_space() {
         let mut data = [0; DEFAULT_PAGE_SIZE];
         let mut page = TablePageMut::init(&mut data);
-        let tuple_size = DEFAULT_PAGE_SIZE - TablePageView::TUPLE_INFOS_OFFSET - size_of::<TupleInfo>();
+        let tuple_size =
+            DEFAULT_PAGE_SIZE - TablePageView::TUPLE_INFOS_OFFSET - size_of::<TupleInfo>();
         let tuple = Tuple::from_bytes(vec![42; tuple_size]);
 
-        assert_eq!(page.insert_tuple(TupleMeta::new(1, false), &tuple), Some(0));
+        assert_eq!(
+            page.insert_tuple(&TupleMeta::new(1, false), &tuple),
+            Some(0)
+        );
         assert_eq!(page.free_space_start(), page.free_space_end());
-        assert_eq!(page.insert_tuple(TupleMeta::new(2, false), &Tuple::from_bytes(vec![])), None);
+        assert_eq!(
+            page.insert_tuple(&TupleMeta::new(2, false), &Tuple::from_bytes(vec![])),
+            None
+        );
     }
 }

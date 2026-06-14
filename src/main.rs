@@ -1,6 +1,7 @@
 #![allow(unused)] // Blanks out all unused warnings for this file/crate
 
 mod buffer;
+mod catalog;
 mod common;
 mod storage;
 

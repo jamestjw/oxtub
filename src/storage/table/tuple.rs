@@ -21,6 +21,22 @@ impl TupleMeta {
     }
 }
 
+// Fixed-size columns like INTEGER, BIGINT, BOOLEAN, etc. are stored directly inside the tuple's
+// fixed-size region. Variable-size columns are stored as a 4-byte offset in the fixed-size
+// region, and the actual payload later in the tuple.
+//
+// Example schema:
+// (a INTEGER, b VARCHAR, c INTEGER)
+//
+// Tuple layout:
+//
+// Tuple data_
+// +----------+----------+----------+-------------------+
+// | a value  | b offset | c value  | b payload          |
+// | 4 bytes  | 4 bytes  | 4 bytes  | len + string bytes |
+// +----------+----------+----------+-------------------+
+// ^          ^          ^          ^
+// 0          4          8          12
 pub struct Tuple {
     data: Vec<u8>,
 }
@@ -38,3 +54,6 @@ impl Tuple {
         &self.data
     }
 }
+
+#[repr(transparent)]
+pub struct VarOffset(pub u32);
