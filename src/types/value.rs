@@ -23,4 +23,12 @@ impl Value {
             Self::Null(sql_type) => *sql_type,
         }
     }
+
+    pub fn variable_storage_size(&self) -> usize {
+        match self {
+            Value::Varchar(str) => str.len(),
+            Value::Null(_) => 0,
+            _ => panic!("should not use this for non variable storage"),
+        }
+    }
 }

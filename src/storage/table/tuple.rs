@@ -1,3 +1,5 @@
+use crate::{catalog::schema::Schema, types::value::Value};
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TupleMeta {
@@ -21,6 +23,14 @@ impl TupleMeta {
     }
 }
 
+#[repr(transparent)]
+pub struct VarOffset(pub u32);
+
+#[repr(transparent)]
+pub struct VarSize(pub u32);
+
+const VAR_NULL_SIZE: VarSize = VarSize(u32::MAX);
+
 // Fixed-size columns like INTEGER, BIGINT, BOOLEAN, etc. are stored directly inside the tuple's
 // fixed-size region. Variable-size columns are stored as a 4-byte offset in the fixed-size
 // region, and the actual payload later in the tuple.
@@ -31,17 +41,39 @@ impl TupleMeta {
 // Tuple layout:
 //
 // Tuple data_
-// +----------+----------+----------+-------------------+
-// | a value  | b offset | c value  | b payload          |
-// | 4 bytes  | 4 bytes  | 4 bytes  | len + string bytes |
-// +----------+----------+----------+-------------------+
-// ^          ^          ^          ^
-// 0          4          8          12
+// +----------+--------------+----------+------------------------+
+// | a value  | b VarOffset  | c value  | b payload              |
+// | 4 bytes  | 4 bytes      | 4 bytes  | VarSize + string bytes |
+// +----------+--------------+----------+------------------------+
+// ^          ^              ^          ^
+// 0          4              8          12
 pub struct Tuple {
     data: Vec<u8>,
 }
 
 impl Tuple {
+    pub fn from_values(values: &[Value], schema: &Schema) -> Self {
+        assert_eq!(values.len(), schema.num_columns());
+        for (value, column) in values.iter().zip(schema.columns()) {
+            assert_eq!(value.sql_type(), column.sql_type());
+        }
+
+        let inlined_size = schema.inlined_storage_size();
+
+        // storage of the varchar + the u32 that represents the length
+        let not_inlined_size = schema
+            .uninlined_column_idxs()
+            .iter()
+            .map(|idx| values[*idx].variable_storage_size() + size_of::<VarSize>())
+            .sum::<usize>();
+        let tuple_size = inlined_size + not_inlined_size;
+
+        let mut data = Vec::with_capacity(tuple_size);
+
+        todo!("load data into vec");
+        Self { data }
+    }
+
     pub fn from_bytes(data: Vec<u8>) -> Self {
         Self { data }
     }
@@ -54,6 +86,3 @@ impl Tuple {
         &self.data
     }
 }
-
-#[repr(transparent)]
-pub struct VarOffset(pub u32);
