@@ -15,4 +15,26 @@ impl TupleMeta {
             _padding: [0; 7],
         }
     }
+
+    pub fn is_deleted(&self) -> bool {
+        self.is_deleted != 0
+    }
+}
+
+pub struct Tuple {
+    data: Vec<u8>,
+}
+
+impl Tuple {
+    pub fn from_bytes(data: Vec<u8>) -> Self {
+        Self { data }
+    }
+
+    pub fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
 }
