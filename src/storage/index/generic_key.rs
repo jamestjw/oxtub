@@ -3,9 +3,9 @@ use std::cmp::Ordering;
 use crate::storage::index::comparator::KeyComparator;
 
 #[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, Debug, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GenericKey<const N: usize> {
-   data: [u8; N],
+    data: [u8; N],
 }
 
 impl GenericKey<4> {
@@ -13,6 +13,10 @@ impl GenericKey<4> {
         Self {
             data: (value ^ i32::MIN).to_be_bytes(),
         }
+    }
+
+    pub fn to_i32(self) -> i32 {
+        i32::from_be_bytes(self.data) ^ i32::MIN
     }
 }
 
@@ -42,7 +46,7 @@ impl<const N: usize> KeyComparator<GenericKey<N>> for GenericKeyComparator {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::index::comparator::{KeyComparator};
+    use crate::storage::index::comparator::KeyComparator;
 
     use super::*;
 
