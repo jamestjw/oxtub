@@ -68,9 +68,25 @@ impl Tuple {
             .sum::<usize>();
         let tuple_size = inlined_size + not_inlined_size;
 
-        let mut data = Vec::with_capacity(tuple_size);
+        let mut data = vec![0; tuple_size];
+        let mut variable_data_offset = inlined_size;
 
-        todo!("load data into vec");
+        for (val, col) in values.iter().zip(schema.columns()) {
+            let inline_start = col.value_offset;
+            let inline_end = inline_start + col.inline_size();
+
+            if col.is_inlined() {
+                val.serialize_to(&mut data[inline_start..inline_end]);
+            } else {
+                data[inline_start..inline_end].copy_from_slice(&variable_data_offset.to_le_bytes());
+                let variable_data_size = size_of::<VarSize>() + val.variable_storage_size();
+                val.serialize_to(
+                    &mut data[variable_data_offset..(variable_data_offset + variable_data_size)],
+                );
+                variable_data_offset += variable_data_size;
+            }
+        }
+
         Self { data }
     }
 

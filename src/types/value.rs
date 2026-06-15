@@ -31,4 +31,10 @@ impl Value {
             _ => panic!("should not use this for non variable storage"),
         }
     }
+
+    pub fn serialize_to(&self, data: &mut [u8]) {
+        // inlined columns will be written as is, variable length columns will
+        // write out the size in u32, then the rest of the data
+        todo!()
+    }
 }
