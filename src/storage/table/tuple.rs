@@ -24,9 +24,11 @@ impl TupleMeta {
 }
 
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VarOffset(pub u32);
 
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VarSize(pub u32);
 
 const VAR_NULL_SIZE: VarSize = VarSize(u32::MAX);
@@ -78,7 +80,8 @@ impl Tuple {
             if col.is_inlined() {
                 val.serialize_to(&mut data[inline_start..inline_end]);
             } else {
-                data[inline_start..inline_end].copy_from_slice(&variable_data_offset.to_le_bytes());
+                data[inline_start..inline_end]
+                    .copy_from_slice(bytemuck::bytes_of(&VarOffset(variable_data_offset as u32)));
                 let variable_data_size = size_of::<VarSize>() + val.variable_storage_size();
                 val.serialize_to(
                     &mut data[variable_data_offset..(variable_data_offset + variable_data_size)],

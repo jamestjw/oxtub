@@ -18,7 +18,7 @@ impl SqlType {
     // The size occupied in the inlined part of the tuple
     pub fn inline_size(self) -> usize {
         match self {
-            Self::Boolean => size_of::<bool>(),
+            Self::Boolean => size_of::<u8>(),
             Self::SmallInt => size_of::<i16>(),
             Self::Integer => size_of::<i32>(),
             Self::BigInt => size_of::<i64>(),
