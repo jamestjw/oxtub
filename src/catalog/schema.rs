@@ -1,4 +1,4 @@
-use crate::catalog::column::Column;
+use crate::{catalog::column::Column, storage::table::tuple::NullBitmap};
 
 pub struct Schema {
     // number of bytes occupied by the fix-length part of the tuple
@@ -11,7 +11,7 @@ pub struct Schema {
 
 impl Schema {
     pub fn new(columns: &[Column]) -> Self {
-        let mut curr_offset = 0;
+        let mut curr_offset = NullBitmap::num_bytes(columns.len());
         let mut processed_columns = Vec::with_capacity(columns.len());
         let mut uninlined_columns = vec![];
 

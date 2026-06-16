@@ -24,11 +24,15 @@ impl Value {
         }
     }
 
-    // Doesn't include the u32 (VarSize) that we use to store the length
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null(_))
+    }
+
+    // includes the u32 (VarSize) that we use to store the length
     // of a variable length data type
     pub fn variable_storage_size(&self) -> usize {
         match self {
-            Value::Varchar(str) => str.len(),
+            Value::Varchar(str) => str.len() + size_of::<VarSize>(),
             Value::Null(_) => 0,
             _ => panic!("should not use this for non variable storage"),
         }
@@ -48,20 +52,7 @@ impl Value {
                     .copy_from_slice(bytemuck::bytes_of(&(VarSize(s.len() as u32))));
                 data[size_of::<VarSize>()..].copy_from_slice(s.as_bytes());
             }
-            Value::Null(sql_type) => Self::serialize_null_of(data, sql_type),
-        }
-    }
-
-    fn serialize_null_of(data: &mut [u8], sql_type: &SqlType) {
-        match sql_type {
-            SqlType::Boolean => data.copy_from_slice(bytemuck::bytes_of(&(u8::MAX))),
-            SqlType::SmallInt => data.copy_from_slice(bytemuck::bytes_of(&i16::MIN)),
-            SqlType::Integer => data.copy_from_slice(bytemuck::bytes_of(&i32::MIN)),
-            SqlType::BigInt => data.copy_from_slice(bytemuck::bytes_of(&i64::MIN)),
-            SqlType::Decimal => data.copy_from_slice(bytemuck::bytes_of(&f64::MIN)),
-            SqlType::Varchar => {
-                data.copy_from_slice(bytemuck::bytes_of(&(VarSize(u32::MAX))));
-            }
+            Value::Null(sql_type) => panic!("should be tracking nulls with the null bitmap"),
         }
     }
 }

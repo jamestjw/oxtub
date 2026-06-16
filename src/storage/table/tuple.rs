@@ -23,6 +23,44 @@ impl TupleMeta {
     }
 }
 
+pub(crate) struct NullBitmap<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> NullBitmap<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { data }
+    }
+
+    pub fn num_bytes(num_columns: usize) -> usize {
+        num_columns.div_ceil(8)
+    }
+
+    pub fn is_null(&self, col_idx: usize) -> bool {
+        let byte_idx = col_idx / 8;
+        let bit_idx = col_idx % 8;
+        let mask = 1u8 << bit_idx;
+        self.data[byte_idx] & mask != 0
+    }
+}
+
+pub(crate) struct NullBitmapMut<'a> {
+    data: &'a mut [u8],
+}
+
+impl<'a> NullBitmapMut<'a> {
+    pub fn new(data: &'a mut [u8]) -> Self {
+        Self { data }
+    }
+
+    pub fn set_null(&mut self, col_idx: usize) {
+        let byte_idx = col_idx / 8;
+        let bit_idx = col_idx % 8;
+        let mask = 1u8 << bit_idx;
+        self.data[byte_idx] |= mask;
+    }
+}
+
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VarOffset(pub u32);
@@ -66,27 +104,39 @@ impl Tuple {
         let not_inlined_size = schema
             .uninlined_column_idxs()
             .iter()
-            .map(|idx| values[*idx].variable_storage_size() + size_of::<VarSize>())
+            .map(|idx| values[*idx].variable_storage_size())
             .sum::<usize>();
         let tuple_size = inlined_size + not_inlined_size;
 
         let mut data = vec![0; tuple_size];
         let mut variable_data_offset = inlined_size;
+        let null_bitmap_size = NullBitmap::num_bytes(values.len());
 
-        for (val, col) in values.iter().zip(schema.columns()) {
-            let inline_start = col.value_offset;
-            let inline_end = inline_start + col.inline_size();
-
-            if col.is_inlined() {
-                val.serialize_to(&mut data[inline_start..inline_end]);
+        for (col_idx, (val, col)) in values.iter().zip(schema.columns()).enumerate() {
+            if val.is_null() {
+                // When we know a column contains a null, we will never read the data
+                // in the slot of the column, so we don't even bother writing it. The variable
+                // length part at the end of the array is not even populated.
+                let mut null_bitmap = NullBitmapMut::new(&mut data[..null_bitmap_size]);
+                null_bitmap.set_null(col_idx);
             } else {
-                data[inline_start..inline_end]
-                    .copy_from_slice(bytemuck::bytes_of(&VarOffset(variable_data_offset as u32)));
-                let variable_data_size = size_of::<VarSize>() + val.variable_storage_size();
-                val.serialize_to(
-                    &mut data[variable_data_offset..(variable_data_offset + variable_data_size)],
-                );
-                variable_data_offset += variable_data_size;
+                let inline_start = col.value_offset;
+                let inline_end = inline_start + col.inline_size();
+
+                if col.is_inlined() {
+                    val.serialize_to(&mut data[inline_start..inline_end]);
+                } else {
+                    data[inline_start..inline_end].copy_from_slice(bytemuck::bytes_of(&VarOffset(
+                        variable_data_offset as u32,
+                    )));
+
+                    let variable_data_size = val.variable_storage_size();
+                    val.serialize_to(
+                        &mut data
+                            [variable_data_offset..(variable_data_offset + variable_data_size)],
+                    );
+                    variable_data_offset += variable_data_size;
+                }
             }
         }
 
@@ -103,5 +153,18 @@ impl Tuple {
 
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+
+    pub fn get_value(&self, schema: &Schema, idx: usize) -> Value {
+        if self.is_null(schema, idx) {
+            Value::Null(schema.columns()[idx].sql_type())
+        } else {
+            todo!()
+        }
+    }
+
+    fn is_null(&self, schema: &Schema, idx: usize) -> bool {
+        let bitmap_size = NullBitmap::num_bytes(schema.num_columns());
+        NullBitmap::new(&self.data[..bitmap_size]).is_null(idx)
     }
 }
