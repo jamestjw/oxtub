@@ -65,28 +65,51 @@ impl<'a> NullBitmapMut<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VarOffset(pub u32);
 
+impl From<VarOffset> for usize {
+    fn from(offset: VarOffset) -> Self {
+        offset.0 as usize
+    }
+}
+
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VarSize(pub u32);
 
-const VAR_NULL_SIZE: VarSize = VarSize(u32::MAX);
+impl From<VarSize> for usize {
+    fn from(size: VarSize) -> Self {
+        size.0 as usize
+    }
+}
 
-// Fixed-size columns like INTEGER, BIGINT, BOOLEAN, etc. are stored directly inside the tuple's
-// fixed-size region. Variable-size columns are stored as a 4-byte offset in the fixed-size
-// region, and the actual payload later in the tuple.
+// Tuple layout:
+//
+// Tuple data begins with a null bitmap. Each column gets one bit:
+// bit = 1 means NULL, bit = 0 means non-NULL.
+//
+// Fixed-size columns like INTEGER, BIGINT, BOOLEAN, etc. are stored directly
+// in the fixed-size region. Variable-size columns store a 4-byte VarOffset in
+// the fixed-size region; the offset points to the variable-size payload later
+// in the tuple.
+//
+// Variable-size payloads are encoded as:
+//
+// +---------+---------------+
+// | VarSize | payload bytes |
+// +---------+---------------+
+//
+// Null values are represented only by the null bitmap. For null variable-size
+// values, no variable-size payload is written.
 //
 // Example schema:
 // (a INTEGER, b VARCHAR, c INTEGER)
 //
-// Tuple layout:
-//
-// Tuple data_
-// +----------+--------------+----------+------------------------+
-// | a value  | b VarOffset  | c value  | b payload              |
-// | 4 bytes  | 4 bytes      | 4 bytes  | VarSize + string bytes |
-// +----------+--------------+----------+------------------------+
-// ^          ^              ^          ^
-// 0          4              8          12
+// Tuple data:
+// +-------------+----------+-------------+----------+------------------------+
+// | null bitmap | a value  | b VarOffset | c value  | b payload              |
+// | 1 byte      | 4 bytes  | 4 bytes     | 4 bytes  | VarSize + string bytes |
+// +-------------+----------+-------------+----------+------------------------+
+// ^             ^          ^             ^          ^
+// 0             1          5             9          13
 pub struct Tuple {
     data: Vec<u8>,
 }
@@ -126,9 +149,8 @@ impl Tuple {
                 if col.is_inlined() {
                     val.serialize_to(&mut data[inline_start..inline_end]);
                 } else {
-                    data[inline_start..inline_end].copy_from_slice(bytemuck::bytes_of(&VarOffset(
-                        variable_data_offset as u32,
-                    )));
+                    let offset = VarOffset(variable_data_offset.try_into().unwrap());
+                    data[inline_start..inline_end].copy_from_slice(bytemuck::bytes_of(&offset));
 
                     let variable_data_size = val.variable_storage_size();
                     val.serialize_to(
@@ -156,15 +178,78 @@ impl Tuple {
     }
 
     pub fn get_value(&self, schema: &Schema, idx: usize) -> Value {
+        let column = &schema.columns()[idx];
+        let sql_type = column.sql_type();
+
         if self.is_null(schema, idx) {
-            Value::Null(schema.columns()[idx].sql_type())
+            Value::Null(sql_type)
+        } else if column.is_inlined() {
+            let value_range = column.value_offset..column.value_offset + sql_type.inline_size();
+            Value::deserialize_from(&self.data[value_range], sql_type)
         } else {
-            todo!()
+            let offset_range = column.value_offset..column.value_offset + size_of::<VarOffset>();
+            let var_offset: VarOffset = bytemuck::pod_read_unaligned(&self.data[offset_range]);
+
+            Value::deserialize_from(&self.data[usize::from(var_offset)..], sql_type)
         }
     }
 
     fn is_null(&self, schema: &Schema, idx: usize) -> bool {
         let bitmap_size = NullBitmap::num_bytes(schema.num_columns());
         NullBitmap::new(&self.data[..bitmap_size]).is_null(idx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{column::Column, types::SqlType};
+
+    #[test]
+    fn tuple_round_trips_non_null_values() {
+        let schema = Schema::new(&[
+            Column::new_static("bool".to_string(), SqlType::Boolean),
+            Column::new_static("small".to_string(), SqlType::SmallInt),
+            Column::new_static("int".to_string(), SqlType::Integer),
+            Column::new_static("big".to_string(), SqlType::BigInt),
+            Column::new_static("decimal".to_string(), SqlType::Decimal),
+            Column::new_variable("varchar".to_string(), SqlType::Varchar, 32),
+        ]);
+        let values = [
+            Value::Boolean(true),
+            Value::SmallInt(-12),
+            Value::Integer(12345),
+            Value::BigInt(-9876543210),
+            Value::Decimal(12.5),
+            Value::Varchar("hello tuple".to_string()),
+        ];
+
+        let tuple = Tuple::from_values(&values, &schema);
+
+        for (idx, value) in values.iter().enumerate() {
+            assert_eq!(tuple.get_value(&schema, idx), *value);
+        }
+    }
+
+    #[test]
+    fn tuple_round_trips_null_values() {
+        let schema = Schema::new(&[
+            Column::new_static("int".to_string(), SqlType::Integer),
+            Column::new_variable("nullable_varchar".to_string(), SqlType::Varchar, 32),
+            Column::new_static("nullable_big".to_string(), SqlType::BigInt),
+            Column::new_variable("varchar".to_string(), SqlType::Varchar, 32),
+        ]);
+        let values = [
+            Value::Integer(7),
+            Value::Null(SqlType::Varchar),
+            Value::Null(SqlType::BigInt),
+            Value::Varchar("not null".to_string()),
+        ];
+
+        let tuple = Tuple::from_values(&values, &schema);
+
+        for (idx, value) in values.iter().enumerate() {
+            assert_eq!(tuple.get_value(&schema, idx), *value);
+        }
     }
 }

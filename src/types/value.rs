@@ -52,7 +52,32 @@ impl Value {
                     .copy_from_slice(bytemuck::bytes_of(&(VarSize(s.len() as u32))));
                 data[size_of::<VarSize>()..].copy_from_slice(s.as_bytes());
             }
-            Value::Null(sql_type) => panic!("should be tracking nulls with the null bitmap"),
+            Value::Null(_) => panic!("should be tracking nulls with the null bitmap"),
+        }
+    }
+
+    pub fn deserialize_from(data: &[u8], sql_type: SqlType) -> Self {
+        match sql_type {
+            SqlType::Boolean => Value::Boolean(data[0] != 0),
+            SqlType::SmallInt => {
+                Value::SmallInt(bytemuck::pod_read_unaligned(&data[..size_of::<i16>()]))
+            }
+            SqlType::Integer => {
+                Value::Integer(bytemuck::pod_read_unaligned(&data[..size_of::<i32>()]))
+            }
+            SqlType::BigInt => {
+                Value::BigInt(bytemuck::pod_read_unaligned(&data[..size_of::<i64>()]))
+            }
+            SqlType::Decimal => {
+                Value::Decimal(bytemuck::pod_read_unaligned(&data[..size_of::<f64>()]))
+            }
+            SqlType::Varchar => {
+                let var_size: VarSize = bytemuck::pod_read_unaligned(&data[..size_of::<VarSize>()]);
+                let start = size_of::<VarSize>();
+                let end = start + usize::from(var_size);
+                let s = String::from_utf8(data[start..end].to_vec()).unwrap();
+                Value::Varchar(s)
+            }
         }
     }
 }
