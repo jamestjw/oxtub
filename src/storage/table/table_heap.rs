@@ -95,7 +95,12 @@ impl<'a> TableHeap<'a> {
 mod tests {
     use tempfile::NamedTempFile;
 
-    use crate::{buffer::bpm::BufferPoolManager, storage::disk::disk_manager::DiskManager};
+    use crate::{
+        buffer::bpm::BufferPoolManager,
+        catalog::{column::Column, schema::Schema, types::SqlType},
+        storage::disk::disk_manager::DiskManager,
+        types::value::Value,
+    };
 
     use super::*;
 
@@ -134,5 +139,31 @@ mod tests {
             assert_eq!(actual_meta, expected_meta);
             assert_eq!(actual_tuple.data(), expected_tuple.data());
         }
+    }
+
+    #[test]
+    fn insert_and_get_schema_backed_tuple_values() {
+        let bpm = setup_bpm(3);
+        let table_heap = TableHeap::new(&bpm).unwrap();
+        let schema = Schema::new(&[
+            Column::new_static("id".to_string(), SqlType::Integer),
+            Column::new_variable("name".to_string(), SqlType::Varchar, 32),
+            Column::new_static("score".to_string(), SqlType::Decimal),
+            Column::new_variable("nickname".to_string(), SqlType::Varchar, 32),
+        ]);
+        let values = vec![
+            Value::Integer(42),
+            Value::Varchar("alice".to_string()),
+            Value::Decimal(98.5),
+            Value::Null(SqlType::Varchar),
+        ];
+        let meta = TupleMeta::new(7, false);
+        let tuple = Tuple::from_values(&values, &schema);
+
+        let rid = table_heap.insert_tuple(&meta, &tuple).unwrap();
+        let (actual_meta, actual_tuple) = table_heap.get_tuple(rid).unwrap();
+
+        assert_eq!(actual_meta, meta);
+        assert_eq!(actual_tuple.get_values(&schema), values);
     }
 }

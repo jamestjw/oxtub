@@ -194,6 +194,12 @@ impl Tuple {
         }
     }
 
+    pub fn get_values(&self, schema: &Schema) -> Vec<Value> {
+        (0..schema.num_columns())
+            .map(|idx| self.get_value(schema, idx))
+            .collect()
+    }
+
     fn is_null(&self, schema: &Schema, idx: usize) -> bool {
         let bitmap_size = NullBitmap::num_bytes(schema.num_columns());
         NullBitmap::new(&self.data[..bitmap_size]).is_null(idx)
