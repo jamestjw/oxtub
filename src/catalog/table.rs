@@ -3,9 +3,9 @@ use crate::{catalog::schema::Schema, storage::table::table_heap::TableHeap};
 pub type TableId = u32;
 
 pub struct TableInfo<'a> {
-    schema: Schema,
+    pub(crate) schema: Schema,
     name: String,
-    table_heap: TableHeap<'a>,
+    pub(crate) table_heap: TableHeap<'a>,
     table_oid: TableId,
 }
 

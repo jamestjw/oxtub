@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use crate::{
-    buffer::bpm::BufferPoolManager,
+    buffer::{bpm::BufferPoolManager, page::INVALID_PAGE_ID, page_guard::ReadPageGuard},
     common::types::PageId,
     storage::{
         page::table_page::{TablePage, TablePageMut},
@@ -88,6 +88,56 @@ impl<'a> TableHeap<'a> {
         let page_guard = self.bpm.read_page(rid.page_id)?;
         let page = TablePage::from_data(page_guard.data());
         Ok(page.get_tuple(rid.slot_id as usize))
+    }
+
+    pub fn iter(&self) -> TableHeapIterator<'_> {
+        TableHeapIterator {
+            bpm: self.bpm,
+            idx: 0,
+            read_page_guard: self
+                .bpm
+                .read_page(self.inner.lock().unwrap().first_page_id)
+                .unwrap()
+                .into(),
+        }
+    }
+}
+
+pub struct TableHeapIterator<'a> {
+    bpm: &'a BufferPoolManager,
+    idx: usize,
+    read_page_guard: Option<ReadPageGuard<'a>>,
+}
+
+impl<'a> Iterator for TableHeapIterator<'a> {
+    type Item = (Rid, TupleMeta, Tuple);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let guard = self.read_page_guard.as_ref()?;
+            let curr_page = TablePage::from_data(guard.data());
+
+            while self.idx < curr_page.num_tuples() {
+                let idx = self.idx;
+                self.idx += 1;
+
+                let (meta, tuple) = curr_page.get_tuple(idx);
+
+                let rid = Rid::new(guard.page_id(), idx);
+
+                return Some((rid, meta, tuple));
+            }
+
+            let next_page_id = curr_page.next_page_id();
+            self.read_page_guard.take();
+
+            if next_page_id == INVALID_PAGE_ID {
+                return None;
+            }
+
+            self.read_page_guard = Some(self.bpm.read_page(next_page_id).unwrap());
+            self.idx = 0;
+        }
     }
 }
 

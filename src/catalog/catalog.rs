@@ -8,14 +8,17 @@ use crate::{
         schema::Schema,
         table::{TableId, TableInfo},
     },
-    storage::table::table_heap::TableHeap,
+    storage::{
+        index::index::{Index, IndexMetadata},
+        table::table_heap::TableHeap,
+    },
 };
 
 pub struct Catalog<'a> {
     bpm: &'a BufferPoolManager,
     tables: HashMap<TableId, TableInfo<'a>>,
     indexes: HashMap<IndexId, IndexInfo>,
-    table_names: HashMap<String, IndexId>,
+    table_names: HashMap<String, TableId>,
     // table_name -> index_name -> index_oid
     table_index_names: HashMap<String, HashMap<String, IndexId>>,
 
@@ -44,7 +47,7 @@ impl<'a> Catalog<'a> {
         schema: Schema,
     ) -> Result<&TableInfo<'_>, CatalogError> {
         if self.table_names.contains_key(&name) {
-            return Err(CatalogError::DuplicateTableName(name));
+            return Err(CatalogError::DuplicateTable(name));
         }
 
         let table_heap = TableHeap::new(self.bpm)?;
@@ -56,5 +59,85 @@ impl<'a> Catalog<'a> {
         self.table_index_names.insert(name, HashMap::new());
 
         Ok(self.tables.get(&table_oid).unwrap())
+    }
+
+    pub fn get_tbl_by_name(&self, name: &str) -> Result<&TableInfo<'_>, CatalogError> {
+        match self.table_names.get(name) {
+            Some(table_oid) => match self.tables.get(table_oid) {
+                Some(info) => Ok(info),
+                None => panic!("table oid invalid?"),
+            },
+            None => Err(CatalogError::TableNotFound(name.into())),
+        }
+    }
+
+    pub fn get_tbl_by_oid(&self, oid: TableId) -> Result<&TableInfo<'_>, CatalogError> {
+        match self.tables.get(&oid) {
+            Some(info) => Ok(info),
+            None => Err(CatalogError::TableNotFound(oid.into())),
+        }
+    }
+
+    pub fn create_index(
+        &mut self,
+        index_name: String,
+        table_name: String,
+        key_schema: Schema,
+        key_attrs: Vec<usize>,
+        key_size: usize,
+        is_pk: bool,
+    ) -> Result<&IndexInfo, CatalogError> {
+        if let None = self.table_names.get(&table_name) {
+            return Err(CatalogError::TableNotFound(table_name.as_str().into()));
+        }
+
+        let table_schema = match self.table_names.get(&table_name) {
+            None => return Err(CatalogError::TableNotFound(table_name.as_str().into())),
+            Some(oid) => match self.tables.get(oid) {
+                Some(table_info) => &table_info.schema,
+                None => panic!("table info not found"),
+            },
+        };
+
+        let mut table_index_names = match self.table_index_names.get_mut(&table_name) {
+            None => panic!("table does not exist?"),
+            Some(indexes) => indexes,
+        };
+
+        if let Some(_) = table_index_names.get(&index_name) {
+            return Err(CatalogError::DuplicateIndex(index_name));
+        };
+
+        let metadata = IndexMetadata {
+            name: index_name,
+            table_name,
+            key_schema,
+            key_attrs,
+            is_pk,
+        };
+
+        // TODO: implement the trait for the BTreeIndex so we can construct it here
+        let mut index: Box<dyn Index> = todo!();
+
+        let table_meta = self.get_tbl_by_name(&table_name)?;
+
+        for (rid, tuple_meta, tuple) in table_meta.table_heap.iter() {
+            let key = tuple.key_from_tuple(table_schema, &key_schema, &key_attrs);
+
+            if tuple_meta.is_deleted() {
+                continue;
+            }
+
+            index.insert_entry(&key, rid);
+        }
+
+        let index_oid = self.next_index_oid;
+        let index_info = IndexInfo::new(key_size, index_oid, index);
+        self.next_index_oid += 1;
+
+        self.indexes.insert(index_oid, index_info);
+        table_index_names.insert(index_name, index_oid);
+
+        Ok(&self.indexes.get(&index_oid).unwrap())
     }
 }

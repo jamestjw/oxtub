@@ -116,6 +116,10 @@ impl<'a> TablePageView<'a> {
         self.header().num_deleted_tuples as usize
     }
 
+    pub fn next_page_id(&self) -> PageId {
+        self.header().next_page_id
+    }
+
     fn tuple_infos(&self) -> &[TupleInfo] {
         let start = Self::TUPLE_INFOS_OFFSET;
         let end = start + self.num_tuples() * size_of::<TupleInfo>();
@@ -163,6 +167,14 @@ impl<'a> TablePage<'a> {
 
     pub fn get_tuple(&self, slot_id: usize) -> (TupleMeta, Tuple) {
         self.view.get_tuple(slot_id)
+    }
+
+    pub fn num_tuples(&self) -> usize {
+        self.view.num_tuples()
+    }
+
+    pub fn next_page_id(&self) -> PageId {
+        self.view.next_page_id()
     }
 }
 

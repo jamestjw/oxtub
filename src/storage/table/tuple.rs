@@ -204,6 +204,21 @@ impl Tuple {
         let bitmap_size = NullBitmap::num_bytes(schema.num_columns());
         NullBitmap::new(&self.data[..bitmap_size]).is_null(idx)
     }
+
+    pub fn key_from_tuple(
+        &self,
+        schema: &Schema,
+        key_schema: &Schema,
+        key_attrs: &[usize],
+    ) -> Self {
+        let mut values = Vec::with_capacity(key_attrs.len());
+
+        for key_attr in key_attrs {
+            values.push(self.get_value(schema, *key_attr));
+        }
+
+        Tuple::from_values(&values, key_schema)
+    }
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use crate::{
 
 pub struct IndexMetadata {
     pub name: String,
-    pub tbl_name: String,
+    pub table_name: String,
     pub key_schema: Schema,
     pub key_attrs: Vec<usize>,
     pub is_pk: bool,
