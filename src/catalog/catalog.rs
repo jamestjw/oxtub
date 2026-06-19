@@ -9,15 +9,19 @@ use crate::{
         table::{TableId, TableInfo},
     },
     storage::{
-        index::index::{Index, IndexMetadata},
-        table::table_heap::TableHeap,
+        index::{
+            b_tree_index::BTreeIndex,
+            generic_key::GenericKey,
+            index::{Index, IndexMetadata},
+        },
+        table::{table_heap::TableHeap, tuple::Tuple},
     },
 };
 
 pub struct Catalog<'a> {
     bpm: &'a BufferPoolManager,
     tables: HashMap<TableId, TableInfo<'a>>,
-    indexes: HashMap<IndexId, IndexInfo>,
+    indexes: HashMap<IndexId, IndexInfo<'a>>,
     table_names: HashMap<String, TableId>,
     // table_name -> index_name -> index_oid
     table_index_names: HashMap<String, HashMap<String, IndexId>>,
@@ -86,7 +90,7 @@ impl<'a> Catalog<'a> {
         key_attrs: Vec<usize>,
         key_size: usize,
         is_pk: bool,
-    ) -> Result<&IndexInfo, CatalogError> {
+    ) -> Result<&IndexInfo<'_>, CatalogError> {
         if let None = self.table_names.get(&table_name) {
             return Err(CatalogError::TableNotFound(table_name.as_str().into()));
         }
@@ -99,27 +103,34 @@ impl<'a> Catalog<'a> {
             },
         };
 
-        let mut table_index_names = match self.table_index_names.get_mut(&table_name) {
-            None => panic!("table does not exist?"),
-            Some(indexes) => indexes,
-        };
+        {
+            let table_index_names = self
+                .table_index_names
+                .get(&table_name)
+                .expect("table does not exist?");
 
-        if let Some(_) = table_index_names.get(&index_name) {
-            return Err(CatalogError::DuplicateIndex(index_name));
-        };
+            if table_index_names.contains_key(&index_name) {
+                return Err(CatalogError::DuplicateIndex(index_name));
+            }
+        }
+
+        let table_meta = self.get_tbl_by_name(&table_name)?;
 
         let metadata = IndexMetadata {
-            name: index_name,
-            table_name,
-            key_schema,
-            key_attrs,
+            name: index_name.clone(),
+            table_name: table_name.clone(),
+            key_schema: key_schema.clone(),
+            key_attrs: key_attrs.clone(),
             is_pk,
         };
 
         // TODO: implement the trait for the BTreeIndex so we can construct it here
-        let mut index: Box<dyn Index> = todo!();
-
-        let table_meta = self.get_tbl_by_name(&table_name)?;
+        let mut index: Box<dyn Index + 'a> = {
+            match key_size {
+                4 => Box::new(BTreeIndex::<4>::new(self.bpm, metadata, Self::encode_key)),
+                _ => return Err(CatalogError::UnsupportedIndexType),
+            }
+        };
 
         for (rid, tuple_meta, tuple) in table_meta.table_heap.iter() {
             let key = tuple.key_from_tuple(table_schema, &key_schema, &key_attrs);
@@ -128,7 +139,7 @@ impl<'a> Catalog<'a> {
                 continue;
             }
 
-            index.insert_entry(&key, rid);
+            index.insert_entry(&key, rid)?;
         }
 
         let index_oid = self.next_index_oid;
@@ -136,8 +147,15 @@ impl<'a> Catalog<'a> {
         self.next_index_oid += 1;
 
         self.indexes.insert(index_oid, index_info);
-        table_index_names.insert(index_name, index_oid);
+        self.table_index_names
+            .get_mut(&table_name)
+            .unwrap()
+            .insert(index_name, index_oid);
 
         Ok(&self.indexes.get(&index_oid).unwrap())
+    }
+
+    fn encode_key<const N: usize>(tuple: &Tuple, schema: &Schema) -> GenericKey<N> {
+        todo!()
     }
 }

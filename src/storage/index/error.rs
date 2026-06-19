@@ -16,3 +16,15 @@ pub enum BTreeError {
     #[error("tuple does not exist")]
     NotFound,
 }
+
+#[derive(Debug, Error)]
+pub enum IndexError {
+    #[error("duplicate key")]
+    DuplicateKey,
+
+    #[error("key not found")]
+    KeyNotFound,
+
+    #[error("buffer pool error: {0}")]
+    BufferPool(BufferPoolError),
+}

@@ -2,7 +2,7 @@ use std::error::Error;
 
 use crate::{
     catalog::schema::Schema,
-    storage::{rid::Rid, table::tuple::Tuple},
+    storage::{index::error::IndexError, rid::Rid, table::tuple::Tuple},
 };
 
 pub struct IndexMetadata {
@@ -15,7 +15,7 @@ pub struct IndexMetadata {
 
 pub trait Index {
     fn metadata(&self) -> &IndexMetadata;
-    fn insert_entry(&mut self, key: &Tuple, rid: Rid) -> Result<(), Box<dyn Error>>;
-    fn delete_entry(&mut self, key: &Tuple, rid: Rid) -> Result<(), Box<dyn Error>>;
-    fn scan_key(&mut self, key: &Tuple) -> Result<Vec<Rid>, Box<dyn Error>>;
+    fn insert_entry(&mut self, key: &Tuple, rid: Rid) -> Result<(), IndexError>;
+    fn delete_entry(&mut self, key: &Tuple, rid: Rid) -> Result<(), IndexError>;
+    fn scan_key(&mut self, key: &Tuple) -> Result<Vec<Rid>, IndexError>;
 }

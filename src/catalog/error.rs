@@ -1,6 +1,9 @@
 use thiserror::Error;
 
-use crate::{catalog::table::TableId, storage::table::error::TableHeapError};
+use crate::{
+    catalog::table::TableId,
+    storage::{index::error::IndexError, table::error::TableHeapError},
+};
 
 #[derive(Debug)]
 pub enum TableIdentifier {
@@ -33,4 +36,10 @@ pub enum CatalogError {
 
     #[error("table not found: {0:?}")]
     TableNotFound(TableIdentifier),
+
+    #[error("unsupported index type")]
+    UnsupportedIndexType,
+
+    #[error("index error: {0}")]
+    Index(#[from] IndexError),
 }
