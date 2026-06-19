@@ -27,4 +27,7 @@ pub enum IndexError {
 
     #[error("buffer pool error: {0}")]
     BufferPool(BufferPoolError),
+
+    #[error("unsupported index type")]
+    UnsupportedIndexType,
 }

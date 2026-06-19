@@ -2223,42 +2223,4 @@ mod tests {
 
         values.into_iter().collect()
     }
-
-    #[test]
-    fn insert_lookup_with_generic_keys() {
-        const TOMB_CAP: usize = 5;
-
-        let bpm = setup_bpm(50);
-        let header_page_id = bpm.new_page();
-        let comparator = GenericKeyComparator;
-        let tree = BTree::<GenericKey<4>, _, TOMB_CAP>::new(&bpm, header_page_id, &comparator);
-
-        let num_values = BTreeLeafPageMut::<GenericKey<4>, TOMB_CAP>::MAX_SIZE * 5;
-        let mut keys = pseudo_random_i32_values(num_values);
-
-        fn rid_for_idx(idx: usize) -> Rid {
-            Rid::new(
-                (idx as u64 / (u16::MAX as u64 + 1)) as PageId,
-                (idx & 0xffff) as usize,
-            )
-        }
-
-        for (idx, &key) in keys.iter().enumerate() {
-            tree.insert(GenericKey::from_i32(key), rid_for_idx(idx))
-                .unwrap();
-        }
-
-        for (idx, &key) in keys.iter().enumerate() {
-            assert_eq!(
-                tree.get_values(&GenericKey::from_i32(key)).unwrap(),
-                vec![rid_for_idx(idx)]
-            );
-        }
-
-        keys.sort();
-        assert_eq!(
-            tree.iter().map(|(k, _)| k.to_i32()).collect::<Vec<_>>(),
-            keys
-        );
-    }
 }

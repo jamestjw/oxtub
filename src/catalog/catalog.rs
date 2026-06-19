@@ -7,18 +7,11 @@ use crate::{
         index::{IndexId, IndexInfo},
         schema::Schema,
         table::{TableId, TableInfo},
-        types::SqlType,
     },
     storage::{
-        index::{
-            b_tree_index::BTreeIndex,
-            generic_key::GenericKey,
-            index::{Index, IndexMetadata},
-            key_encoder::encode_i32_key,
-        },
-        table::{table_heap::TableHeap, tuple::Tuple},
+        index::{factory::build_index, index::IndexMetadata},
+        table::table_heap::TableHeap,
     },
-    types::value::Value,
 };
 
 pub struct Catalog<'a> {
@@ -127,7 +120,14 @@ impl<'a> Catalog<'a> {
             is_pk,
         };
 
-        let mut index = self.build_index(&key_schema, &key_attrs, key_size, metadata)?;
+        let mut index = build_index(
+            self.bpm,
+            table_schema,
+            &key_schema,
+            &key_attrs,
+            key_size,
+            metadata,
+        )?;
 
         for (rid, tuple_meta, tuple) in table_meta.table_heap.iter() {
             let key = tuple.key_from_tuple(table_schema, &key_schema, &key_attrs);
@@ -150,30 +150,5 @@ impl<'a> Catalog<'a> {
             .insert(index_name, index_oid);
 
         Ok(&self.indexes.get(&index_oid).unwrap())
-    }
-
-    pub fn build_index(
-        &self,
-        key_schema: &Schema,
-        key_attrs: &[usize],
-        key_size: usize,
-        metadata: IndexMetadata,
-    ) -> Result<Box<dyn Index + 'a>, CatalogError> {
-        let index = match (
-            key_size,
-            key_schema
-                .columns()
-                .iter()
-                .map(|col| col.sql_type())
-                .collect::<Vec<_>>()
-                .as_slice(),
-        ) {
-            (4, [SqlType::Integer]) => {
-                Box::new(BTreeIndex::<4>::new(self.bpm, metadata, encode_i32_key))
-            }
-            _ => return Err(CatalogError::UnsupportedIndexType),
-        };
-
-        Ok(index)
     }
 }
