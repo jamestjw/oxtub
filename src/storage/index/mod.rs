@@ -5,3 +5,4 @@ pub mod error;
 pub mod generic_key;
 pub mod index;
 pub mod index_iterator;
+pub mod key_encoder;
