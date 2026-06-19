@@ -1,3 +1,5 @@
+#![allow(clippy::module_inception)]
+
 mod lru_k_replacer;
 mod replacer;
 

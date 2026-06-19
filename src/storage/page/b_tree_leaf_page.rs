@@ -665,7 +665,7 @@ impl<'a, K: Pod, const TOMB_CAP: usize> BTreeLeafPageMut<'a, K, TOMB_CAP> {
         self.set_size(left_size + right.curr_size());
 
         for &tombstone in right.tombstones().iter().take(right.get_tombstone_count()) {
-            self.add_tombstone(usize::try_from(tombstone).unwrap() + left_size);
+            self.add_tombstone(usize::from(tombstone) + left_size);
         }
     }
 }

@@ -41,7 +41,7 @@ enum DiskRequest {
     },
     Write {
         page_id: PageId,
-        data: PageBuffer,
+        data: Box<PageBuffer>,
         response: Sender<Result<(), DiskSchedulerError>>,
     },
     Delete {
@@ -103,10 +103,13 @@ impl DiskScheduler {
             None => Err(DiskSchedulerError::WorkerStopped),
             Some(sender) => {
                 let (resp_sender, resp_receiver) = channel();
-                if let Err(_) = sender.send(DiskRequest::Read {
-                    page_id,
-                    response: resp_sender,
-                }) {
+                if sender
+                    .send(DiskRequest::Read {
+                        page_id,
+                        response: resp_sender,
+                    })
+                    .is_err()
+                {
                     return Err(DiskSchedulerError::WorkerUnreachable);
                 }
 
@@ -123,11 +126,14 @@ impl DiskScheduler {
             None => Err(DiskSchedulerError::WorkerStopped),
             Some(sender) => {
                 let (resp_sender, resp_receiver) = channel();
-                if let Err(_) = sender.send(DiskRequest::Write {
-                    page_id,
-                    data,
-                    response: resp_sender,
-                }) {
+                if sender
+                    .send(DiskRequest::Write {
+                        page_id,
+                        data: Box::new(data),
+                        response: resp_sender,
+                    })
+                    .is_err()
+                {
                     return Err(DiskSchedulerError::WorkerUnreachable);
                 }
 

@@ -253,7 +253,7 @@ impl<'a> TablePageMut<'a> {
         if size_of::<TupleInfo>() + tuple_size <= self.free_space_end() - self.free_space_start() {
             let tuple_offset = self.free_space_end() - tuple_size;
             self.data[tuple_offset..tuple_offset + tuple_size].copy_from_slice(tuple.data());
-            self.append_tuple_info(TupleInfo::new(tuple_offset, tuple_size, meta.clone()));
+            self.append_tuple_info(TupleInfo::new(tuple_offset, tuple_size, *meta));
 
             if meta.is_deleted() {
                 self.set_num_deleted_tuples(self.num_deleted_tuples() + 1);

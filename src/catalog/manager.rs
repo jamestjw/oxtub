@@ -87,7 +87,7 @@ impl<'a> Catalog<'a> {
         key_size: usize,
         is_pk: bool,
     ) -> Result<&IndexInfo<'_>, CatalogError> {
-        if let None = self.table_names.get(&table_name) {
+        if !self.table_names.contains_key(&table_name) {
             return Err(CatalogError::TableNotFound(table_name.as_str().into()));
         }
 
@@ -149,6 +149,6 @@ impl<'a> Catalog<'a> {
             .unwrap()
             .insert(index_name, index_oid);
 
-        Ok(&self.indexes.get(&index_oid).unwrap())
+        Ok(self.indexes.get(&index_oid).unwrap())
     }
 }

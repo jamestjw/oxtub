@@ -1,3 +1,5 @@
+#![allow(clippy::module_inception)]
+
 pub mod b_tree;
 pub mod b_tree_index;
 pub mod comparator;

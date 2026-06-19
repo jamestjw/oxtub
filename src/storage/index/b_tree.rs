@@ -697,7 +697,6 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
             }
         };
 
-        drop(leaf);
         drop(leaf_guard);
         self.bpm.delete_page(deleted_page_id)?;
         self.propagate_parent_underflow(ctx)
@@ -709,8 +708,7 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
             "should have at least 1 internal page"
         );
 
-        while !ctx.write_set.is_empty() {
-            let mut page_guard = ctx.write_set.pop().unwrap();
+        while let Some(mut page_guard) = ctx.write_set.pop() {
             let page_id = page_guard.page_id();
 
             if ctx.is_root(page_id) {

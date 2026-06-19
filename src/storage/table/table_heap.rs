@@ -117,7 +117,7 @@ impl<'a> Iterator for TableHeapIterator<'a> {
             let guard = self.read_page_guard.as_ref()?;
             let curr_page = TablePage::from_data(guard.data());
 
-            while self.idx < curr_page.num_tuples() {
+            if self.idx < curr_page.num_tuples() {
                 let idx = self.idx;
                 self.idx += 1;
 
