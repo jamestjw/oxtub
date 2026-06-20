@@ -22,8 +22,6 @@ pub struct Catalog<'a> {
     // table_name -> index_name -> index_oid
     table_index_names: HashMap<String, HashMap<String, IndexId>>,
 
-    // TODO: evaluate if we should make this atomic, since I think
-    // we should allow concurrent accesses to this struct?
     next_table_oid: TableId,
     next_index_oid: IndexId,
 }
@@ -99,15 +97,13 @@ impl<'a> Catalog<'a> {
             },
         };
 
+        if self
+            .table_index_names
+            .get(&table_name)
+            .unwrap()
+            .contains_key(&index_name)
         {
-            let table_index_names = self
-                .table_index_names
-                .get(&table_name)
-                .expect("table does not exist?");
-
-            if table_index_names.contains_key(&index_name) {
-                return Err(CatalogError::DuplicateIndex(index_name));
-            }
+            return Err(CatalogError::DuplicateIndex(index_name));
         }
 
         let table_meta = self.get_tbl_by_name(&table_name)?;
