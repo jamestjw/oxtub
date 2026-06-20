@@ -190,3 +190,139 @@ impl<'a> Catalog<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::NamedTempFile;
+
+    use crate::{
+        buffer::bpm::BufferPoolManager,
+        catalog::{column::Column, types::SqlType},
+        storage::disk::disk_manager::DiskManager,
+    };
+
+    use super::*;
+
+    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
+        BufferPoolManager::new(pool_size, disk_manager)
+    }
+
+    fn int_schema() -> Schema {
+        Schema::new(&[Column::new_static("id".to_string(), SqlType::Integer)])
+    }
+
+    fn create_users_table(catalog: &mut Catalog<'_>) {
+        catalog
+            .create_tbl("users".to_string(), int_schema())
+            .unwrap();
+    }
+
+    fn create_users_id_index(catalog: &mut Catalog<'_>) {
+        catalog
+            .create_index(
+                "idx_users_id".to_string(),
+                "users".to_string(),
+                int_schema(),
+                vec![0],
+                size_of::<i32>(),
+                false,
+            )
+            .unwrap();
+    }
+
+    fn unwrap_catalog_err<T>(result: Result<T, CatalogError>) -> CatalogError {
+        match result {
+            Ok(_) => panic!("expected catalog error"),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn create_and_get_table() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+
+        let table = catalog
+            .create_tbl("users".to_string(), int_schema())
+            .unwrap();
+
+        assert_eq!(table.name(), "users");
+        assert_eq!(catalog.get_tbl_by_name("users").unwrap().name(), "users");
+        assert_eq!(catalog.get_tbl_by_oid(0).unwrap().name(), "users");
+    }
+
+    #[test]
+    fn duplicate_table_returns_error() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+
+        create_users_table(&mut catalog);
+        let err = unwrap_catalog_err(catalog.create_tbl("users".to_string(), int_schema()));
+
+        assert!(matches!(err, CatalogError::DuplicateTable(name) if name == "users"));
+    }
+
+    #[test]
+    fn missing_table_returns_error() {
+        let bpm = setup_bpm(3);
+        let catalog = Catalog::new(&bpm);
+
+        let by_name = unwrap_catalog_err(catalog.get_tbl_by_name("missing"));
+        let by_oid = unwrap_catalog_err(catalog.get_tbl_by_oid(99));
+
+        assert!(matches!(by_name, CatalogError::TableNotFound(_)));
+        assert!(matches!(by_oid, CatalogError::TableNotFound(_)));
+    }
+
+    #[test]
+    fn create_and_get_index() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+
+        create_users_table(&mut catalog);
+        create_users_id_index(&mut catalog);
+
+        assert!(
+            catalog
+                .get_idx_for_tbl_name("idx_users_id", "users")
+                .is_ok()
+        );
+        assert!(catalog.get_idx_for_tbl_oid("idx_users_id", 0).is_ok());
+        assert!(catalog.get_idx_by_oid(0).is_ok());
+        assert_eq!(catalog.get_table_indexes("users").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn duplicate_index_returns_error() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+
+        create_users_table(&mut catalog);
+        create_users_id_index(&mut catalog);
+        let err = unwrap_catalog_err(catalog.create_index(
+            "idx_users_id".to_string(),
+            "users".to_string(),
+            int_schema(),
+            vec![0],
+            size_of::<i32>(),
+            false,
+        ));
+
+        assert!(matches!(err, CatalogError::DuplicateIndex(name) if name == "idx_users_id"));
+    }
+
+    #[test]
+    fn missing_index_returns_error() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+
+        create_users_table(&mut catalog);
+        let by_name = unwrap_catalog_err(catalog.get_idx_for_tbl_name("missing_idx", "users"));
+        let by_oid = unwrap_catalog_err(catalog.get_idx_by_oid(99));
+
+        assert!(matches!(by_name, CatalogError::IndexNotFound(_)));
+        assert!(matches!(by_oid, CatalogError::IndexNotFound(_)));
+    }
+}
