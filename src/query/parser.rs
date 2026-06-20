@@ -1,7 +1,8 @@
 use sqlparser::{
     ast::{
-        BinaryOperator as SqlBinaryOperator, CharacterLength, DataType, Expr as SqlExpr, Ident,
-        ObjectName, Query, Select, SelectItem as SqlSelectItem, SetExpr, Statement as SqlStatement,
+        BinaryOperator as SqlBinaryOperator, CharacterLength, ColumnOption, DataType,
+        Expr as SqlExpr, Ident, IndexColumn, ObjectName, Query, Select,
+        SelectItem as SqlSelectItem, SetExpr, Statement as SqlStatement, TableConstraint,
         TableFactor, TableObject, UnaryOperator as SqlUnaryOperator, Value as SqlValue,
     },
     dialect::PostgreSqlDialect,
@@ -119,23 +120,82 @@ fn convert_insert(insert: sqlparser::ast::Insert) -> Result<Statement, QueryErro
 }
 
 fn convert_create_table(create: sqlparser::ast::CreateTable) -> Result<Statement, QueryError> {
+    let mut primary_key = Vec::new();
     let columns = create
         .columns
         .into_iter()
         .map(|column| {
+            let column_name = ident_to_string(&column.name);
+            if column_has_primary_key(&column)? {
+                if !primary_key.is_empty() {
+                    return Err(QueryError::UnsupportedStatement(
+                        "multiple PRIMARY KEY declarations are not supported",
+                    ));
+                }
+                primary_key.push(column_name.clone());
+            }
+
             let (sql_type, size) = convert_data_type(column.data_type)?;
             Ok(CreateColumn {
-                name: ident_to_string(&column.name),
+                name: column_name,
                 sql_type,
                 size,
             })
         })
         .collect::<Result<Vec<_>, QueryError>>()?;
 
+    for constraint in create.constraints {
+        let TableConstraint::PrimaryKey(pk) = constraint else {
+            return Err(QueryError::UnsupportedStatement(
+                "only PRIMARY KEY constraints are supported in CREATE TABLE",
+            ));
+        };
+
+        if !primary_key.is_empty() {
+            return Err(QueryError::UnsupportedStatement(
+                "multiple PRIMARY KEY declarations are not supported",
+            ));
+        }
+
+        primary_key = pk
+            .columns
+            .into_iter()
+            .map(convert_primary_key_column)
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+
     Ok(Statement::CreateTable(CreateTableStatement {
         table_name: object_name_to_string(&create.name),
         columns,
+        primary_key,
     }))
+}
+
+fn column_has_primary_key(column: &sqlparser::ast::ColumnDef) -> Result<bool, QueryError> {
+    let mut has_primary_key = false;
+    for option in &column.options {
+        match option.option {
+            ColumnOption::PrimaryKey(_) => {
+                has_primary_key = true;
+            }
+            _ => {
+                return Err(QueryError::UnsupportedStatement(
+                    "only PRIMARY KEY column constraints are supported in CREATE TABLE",
+                ));
+            }
+        }
+    }
+
+    Ok(has_primary_key)
+}
+
+fn convert_primary_key_column(column: IndexColumn) -> Result<String, QueryError> {
+    match column.column.expr {
+        SqlExpr::Identifier(ident) => Ok(ident_to_string(&ident)),
+        _ => Err(QueryError::UnsupportedStatement(
+            "PRIMARY KEY columns must be simple identifiers",
+        )),
+    }
 }
 
 fn convert_select_item(item: SqlSelectItem) -> Result<SelectItem, QueryError> {
@@ -495,9 +555,91 @@ mod tests {
                             ),
                         },
                     ],
+                    primary_key: [],
                 },
             )"#]]
         .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn parses_create_table_with_column_primary_key() {
+        let statement =
+            parse_sql("create table users (id integer primary key, name varchar(32))").unwrap();
+
+        expect![[r#"
+            CreateTable(
+                CreateTableStatement {
+                    table_name: "users",
+                    columns: [
+                        CreateColumn {
+                            name: "id",
+                            sql_type: Integer,
+                            size: None,
+                        },
+                        CreateColumn {
+                            name: "name",
+                            sql_type: Varchar,
+                            size: Some(
+                                32,
+                            ),
+                        },
+                    ],
+                    primary_key: [
+                        "id",
+                    ],
+                },
+            )"#]]
+        .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn parses_create_table_with_table_primary_key() {
+        let statement =
+            parse_sql("create table users (id integer, name varchar(32), primary key (id, name))")
+                .unwrap();
+
+        expect![[r#"
+            CreateTable(
+                CreateTableStatement {
+                    table_name: "users",
+                    columns: [
+                        CreateColumn {
+                            name: "id",
+                            sql_type: Integer,
+                            size: None,
+                        },
+                        CreateColumn {
+                            name: "name",
+                            sql_type: Varchar,
+                            size: Some(
+                                32,
+                            ),
+                        },
+                    ],
+                    primary_key: [
+                        "id",
+                        "name",
+                    ],
+                },
+            )"#]]
+        .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn rejects_non_primary_key_create_table_constraints() {
+        let err = parse_sql("create table users (id integer not null)").unwrap_err();
+        assert!(matches!(err, QueryError::UnsupportedStatement(_)));
+
+        let err = parse_sql("create table users (id integer, unique (id))").unwrap_err();
+        assert!(matches!(err, QueryError::UnsupportedStatement(_)));
+    }
+
+    #[test]
+    fn rejects_multiple_primary_key_declarations() {
+        let err =
+            parse_sql("create table users (id integer primary key, primary key (id))").unwrap_err();
+
+        assert!(matches!(err, QueryError::UnsupportedStatement(_)));
     }
 
     #[test]

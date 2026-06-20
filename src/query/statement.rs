@@ -31,6 +31,7 @@ pub struct InsertStatement {
 pub struct CreateTableStatement {
     pub table_name: String,
     pub columns: Vec<CreateColumn>,
+    pub primary_key: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
