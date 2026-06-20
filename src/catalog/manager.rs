@@ -147,4 +147,46 @@ impl<'a> Catalog<'a> {
 
         Ok(self.indexes.get(&index_oid).unwrap())
     }
+
+    pub fn get_idx_for_tbl_name(
+        &self,
+        index_name: &str,
+        tbl_name: &str,
+    ) -> Result<&IndexInfo<'a>, CatalogError> {
+        match self.table_index_names.get(tbl_name) {
+            None => Err(CatalogError::TableNotFound(tbl_name.into())),
+            Some(index_map) => match index_map.get(index_name) {
+                None => Err(CatalogError::IndexNotFound(index_name.into())),
+                Some(index_oid) => Ok(self.indexes.get(index_oid).expect("index not found")),
+            },
+        }
+    }
+
+    pub fn get_idx_for_tbl_oid(
+        &self,
+        index_name: &str,
+        tbl_oid: TableId,
+    ) -> Result<&IndexInfo<'a>, CatalogError> {
+        match self.tables.get(&tbl_oid) {
+            None => Err(CatalogError::TableNotFound(tbl_oid.into())),
+            Some(tbl_info) => self.get_idx_for_tbl_name(index_name, tbl_info.name()),
+        }
+    }
+
+    pub fn get_idx_by_oid(&self, index_oid: IndexId) -> Result<&IndexInfo<'a>, CatalogError> {
+        match self.indexes.get(&index_oid) {
+            None => Err(CatalogError::IndexNotFound(index_oid.into())),
+            Some(idx_info) => Ok(idx_info),
+        }
+    }
+
+    pub fn get_table_indexes(&self, table_name: &str) -> Result<Vec<&IndexInfo<'a>>, CatalogError> {
+        match self.table_index_names.get(table_name) {
+            None => Err(CatalogError::TableNotFound(table_name.into())),
+            Some(index_map) => Ok(index_map
+                .values()
+                .map(|idx_id| self.get_idx_by_oid(*idx_id).unwrap())
+                .collect::<Vec<_>>()),
+        }
+    }
 }

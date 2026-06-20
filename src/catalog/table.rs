@@ -23,4 +23,8 @@ impl<'a> TableInfo<'a> {
             table_oid,
         }
     }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }

@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::{
-    catalog::table::TableId,
+    catalog::{index::IndexId, table::TableId},
     storage::{index::error::IndexError, table::error::TableHeapError},
 };
 
@@ -20,6 +20,24 @@ impl From<&str> for TableIdentifier {
 impl From<TableId> for TableIdentifier {
     fn from(oid: TableId) -> Self {
         TableIdentifier::Oid(oid)
+    }
+}
+
+#[derive(Debug)]
+pub enum IndexIdentifier {
+    Name(String),
+    Oid(IndexId),
+}
+
+impl From<&str> for IndexIdentifier {
+    fn from(s: &str) -> Self {
+        Self::Name(s.into())
+    }
+}
+
+impl From<IndexId> for IndexIdentifier {
+    fn from(oid: IndexId) -> Self {
+        Self::Oid(oid)
     }
 }
 
@@ -42,4 +60,7 @@ pub enum CatalogError {
 
     #[error("index error: {0}")]
     Index(#[from] IndexError),
+
+    #[error("index not found: {0:?}")]
+    IndexNotFound(IndexIdentifier),
 }
