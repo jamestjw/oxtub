@@ -1,8 +1,8 @@
 use sqlparser::{
     ast::{
-        BinaryOperator, CharacterLength, DataType, Expr as SqlExpr, Ident, ObjectName, Query,
-        Select, SelectItem as SqlSelectItem, SetExpr, Statement as SqlStatement, TableFactor,
-        TableObject, Value as SqlValue,
+        BinaryOperator as SqlBinaryOperator, CharacterLength, DataType, Expr as SqlExpr, Ident,
+        ObjectName, Query, Select, SelectItem as SqlSelectItem, SetExpr, Statement as SqlStatement,
+        TableFactor, TableObject, UnaryOperator as SqlUnaryOperator, Value as SqlValue,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -12,7 +12,7 @@ use crate::{
     catalog::types::SqlType,
     query::{
         error::QueryError,
-        expression::{BinaryOp, Expression},
+        expression::{BinaryOperator, Expression, UnaryOperator},
         statement::{
             CreateColumn, CreateTableStatement, InsertStatement, SelectItem, SelectStatement,
             Statement,
@@ -152,11 +152,24 @@ fn convert_expr(expr: SqlExpr) -> Result<Expression, QueryError> {
     match expr {
         SqlExpr::Identifier(ident) => Ok(Expression::Column(ident_to_string(&ident))),
         SqlExpr::Value(value) => convert_value(value.into()),
+        SqlExpr::UnaryOp { op, expr } => Ok(Expression::UnaryOp {
+            op: convert_unary_op(op)?,
+            expr: Box::new(convert_expr(*expr)?),
+        }),
         SqlExpr::BinaryOp { left, op, right } => Ok(Expression::BinaryOp {
             left: Box::new(convert_expr(*left)?),
             op: convert_binary_op(op)?,
             right: Box::new(convert_expr(*right)?),
         }),
+        SqlExpr::IsNull(expr) => Ok(Expression::UnaryOp {
+            op: UnaryOperator::IsNull,
+            expr: Box::new(convert_expr(*expr)?),
+        }),
+        SqlExpr::IsNotNull(expr) => Ok(Expression::UnaryOp {
+            op: UnaryOperator::IsNotNull,
+            expr: Box::new(convert_expr(*expr)?),
+        }),
+        SqlExpr::Nested(expr) => convert_expr(*expr),
         _ => Err(QueryError::UnsupportedExpression),
     }
 }
@@ -174,16 +187,24 @@ fn convert_value(value: SqlValue) -> Result<Expression, QueryError> {
     }
 }
 
-fn convert_binary_op(op: BinaryOperator) -> Result<BinaryOp, QueryError> {
+fn convert_unary_op(op: SqlUnaryOperator) -> Result<UnaryOperator, QueryError> {
     match op {
-        BinaryOperator::Eq => Ok(BinaryOp::Eq),
-        BinaryOperator::NotEq => Ok(BinaryOp::NotEq),
-        BinaryOperator::Lt => Ok(BinaryOp::Lt),
-        BinaryOperator::LtEq => Ok(BinaryOp::LtEq),
-        BinaryOperator::Gt => Ok(BinaryOp::Gt),
-        BinaryOperator::GtEq => Ok(BinaryOp::GtEq),
-        BinaryOperator::And => Ok(BinaryOp::And),
-        BinaryOperator::Or => Ok(BinaryOp::Or),
+        SqlUnaryOperator::Not => Ok(UnaryOperator::Not),
+        SqlUnaryOperator::Minus => Ok(UnaryOperator::Neg),
+        _ => Err(QueryError::UnsupportedExpression),
+    }
+}
+
+fn convert_binary_op(op: SqlBinaryOperator) -> Result<BinaryOperator, QueryError> {
+    match op {
+        SqlBinaryOperator::Eq => Ok(BinaryOperator::Eq),
+        SqlBinaryOperator::NotEq => Ok(BinaryOperator::NotEq),
+        SqlBinaryOperator::Lt => Ok(BinaryOperator::Lt),
+        SqlBinaryOperator::LtEq => Ok(BinaryOperator::LtEq),
+        SqlBinaryOperator::Gt => Ok(BinaryOperator::Gt),
+        SqlBinaryOperator::GtEq => Ok(BinaryOperator::GtEq),
+        SqlBinaryOperator::And => Ok(BinaryOperator::And),
+        SqlBinaryOperator::Or => Ok(BinaryOperator::Or),
         _ => Err(QueryError::UnsupportedExpression),
     }
 }
@@ -271,6 +292,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_select_projection_unary_operators() {
+        let statement =
+            parse_sql("select not active, -score, name is null, name is not null from users")
+                .unwrap();
+
+        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(UnaryOp { op: Not, expr: Column("active") }), Expression(UnaryOp { op: Neg, expr: Column("score") }), Expression(UnaryOp { op: IsNull, expr: Column("name") }), Expression(UnaryOp { op: IsNotNull, expr: Column("name") })], where_clause: None })"#]]
+            .assert_eq(&format!("{statement:?}"));
+    }
+
+    #[test]
     fn parses_select_where_equality() {
         let statement = parse_sql("select id from users where id = 1").unwrap();
 
@@ -301,6 +332,34 @@ mod tests {
                 },
             )"#]]
         .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn parses_select_where_unary_operators() {
+        let statement = parse_sql("select id from users where not active").unwrap();
+
+        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(Column("id"))], where_clause: Some(UnaryOp { op: Not, expr: Column("active") }) })"#]]
+            .assert_eq(&format!("{statement:?}"));
+
+        let statement = parse_sql("select id from users where -score = 1").unwrap();
+
+        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(Column("id"))], where_clause: Some(BinaryOp { left: UnaryOp { op: Neg, expr: Column("score") }, op: Eq, right: Literal(Integer(1)) }) })"#]]
+            .assert_eq(&format!("{statement:?}"));
+
+        let statement = parse_sql("select id from users where name is null").unwrap();
+
+        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(Column("id"))], where_clause: Some(UnaryOp { op: IsNull, expr: Column("name") }) })"#]]
+            .assert_eq(&format!("{statement:?}"));
+
+        let statement = parse_sql("select id from users where name is not null").unwrap();
+
+        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(Column("id"))], where_clause: Some(UnaryOp { op: IsNotNull, expr: Column("name") }) })"#]]
+            .assert_eq(&format!("{statement:?}"));
+
+        let statement = parse_sql("select id from users where not (name is null)").unwrap();
+
+        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(Column("id"))], where_clause: Some(UnaryOp { op: Not, expr: UnaryOp { op: IsNull, expr: Column("name") } }) })"#]]
+            .assert_eq(&format!("{statement:?}"));
     }
 
     #[test]

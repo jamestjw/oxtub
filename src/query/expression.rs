@@ -4,15 +4,19 @@ use crate::types::value::Value;
 pub enum Expression {
     Column(String),
     Literal(Value),
+    UnaryOp {
+        op: UnaryOperator,
+        expr: Box<Expression>,
+    },
     BinaryOp {
         left: Box<Expression>,
-        op: BinaryOp,
+        op: BinaryOperator,
         right: Box<Expression>,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinaryOp {
+pub enum BinaryOperator {
     Eq,
     NotEq,
     Lt,
@@ -21,4 +25,12 @@ pub enum BinaryOp {
     GtEq,
     And,
     Or,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOperator {
+    Not,
+    Neg,
+    IsNull,
+    IsNotNull,
 }
