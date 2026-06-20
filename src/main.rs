@@ -3,6 +3,7 @@
 mod buffer;
 mod catalog;
 mod common;
+mod query;
 mod storage;
 mod types;
 
