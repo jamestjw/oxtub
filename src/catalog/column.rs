@@ -40,6 +40,10 @@ impl Column {
         self.sql_type
     }
 
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     // size required to store the inlined part of this column
     pub fn inline_size(&self) -> usize {
         match self.size {
