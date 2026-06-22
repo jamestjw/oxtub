@@ -210,6 +210,7 @@ fn convert_select_item(item: SqlSelectItem) -> Result<SelectItem, QueryError> {
 
 fn convert_expr(expr: SqlExpr) -> Result<Expression, QueryError> {
     match expr {
+        // TODO: support table_name.col_name format
         SqlExpr::Identifier(ident) => Ok(Expression::Column(ident_to_string(&ident))),
         SqlExpr::Value(value) => convert_value(value.into()),
         SqlExpr::UnaryOp { op, expr } => Ok(Expression::UnaryOp {

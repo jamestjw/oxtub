@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 
 use crate::{
-    catalog::{column::Column, manager::Catalog, types::SqlType},
+    catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
     query::{
         binder::{
             error::BinderError,
             expression::{BoundExpression, ColumnRef},
             statement::{BoundCreateTable, BoundInsert, BoundSelect, BoundStatement},
-            table_ref::{BoundBaseTableRef, BoundExpressionListRef},
+            table_ref::{BoundBaseTableRef, BoundExpressionListRef, TableRef},
         },
         expression::Expression,
         statement::{
@@ -18,11 +18,15 @@ use crate::{
 
 pub struct Binder<'catalog, 'bpm> {
     catalog: &'catalog Catalog<'bpm>,
+    scope: Option<TableRef>,
 }
 
 impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     pub fn new(catalog: &'catalog Catalog<'bpm>) -> Self {
-        Self { catalog }
+        Self {
+            catalog,
+            scope: None,
+        }
     }
 
     pub fn bind_statement(&self, stmt: Statement) -> Result<BoundStatement, BinderError> {
@@ -117,7 +121,75 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     }
 
     fn bind_expr_list(&self, exprs: Vec<Expression>) -> Result<Vec<BoundExpression>, BinderError> {
-        todo!()
+        let mut res = Vec::with_capacity(exprs.len());
+
+        for expr in exprs {
+            let expr = self.bind_expression(expr)?;
+
+            if matches!(expr, BoundExpression::Star) {
+                return Err(BinderError::UnsupportedExpression(
+                    "unsupported * in expr list".into(),
+                ));
+            }
+
+            res.push(expr);
+        }
+
+        Ok(res)
+    }
+
+    fn bind_expression(&self, expr: Expression) -> Result<BoundExpression, BinderError> {
+        let res = match expr {
+            Expression::Column(c) => BoundExpression::Column(self.bind_column_ref(c)?),
+            Expression::Literal(value) => todo!(),
+            Expression::UnaryOp { op, expr } => todo!(),
+            Expression::BinaryOp { left, op, right } => todo!(),
+        };
+
+        Ok(res)
+    }
+
+    fn bind_column_ref(&self, column: String) -> Result<ColumnRef, BinderError> {
+        // TODO: verify if this is truly an internal error
+        match self.scope.as_ref().expect("should have scope") {
+            TableRef::BaseTable(bound_base_table_ref) => {
+                return Self::resolve_column_ref_from_base_table_ref(bound_base_table_ref, column);
+            }
+            // TODO: reconsider whether or not this should even be a table ref, if
+            // we don't need it as table ref after implementing everything, we should
+            // remove it
+            TableRef::ExprList(_) => panic!("unsupported column ref"),
+        }
+    }
+
+    fn resolve_column_ref_from_base_table_ref(
+        base_table_ref: &BoundBaseTableRef,
+        col_name: String,
+    ) -> Result<ColumnRef, BinderError> {
+        match Self::resolve_column_ref_schema(base_table_ref.schema(), &col_name)? {
+            None => Err(BinderError::ColumnNotFound(col_name)),
+            Some(column_ref) => Ok(column_ref),
+        }
+    }
+
+    fn resolve_column_ref_schema(
+        schema: &Schema,
+        col_name: &str,
+    ) -> Result<Option<ColumnRef>, BinderError> {
+        let mut res = None;
+        for col in schema.columns() {
+            if col.name().to_lowercase() == col_name.to_lowercase() {
+                if res.is_some() {
+                    return Err(BinderError::AmbiguousColumn(col_name.into()));
+                }
+
+                res = Some(ColumnRef::Unqualified {
+                    column: String::from(col.name()),
+                })
+            }
+        }
+
+        Ok(res)
     }
 
     fn bind_base_table_ref(

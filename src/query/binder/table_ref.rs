@@ -3,6 +3,11 @@ use crate::{
     query::binder::expression::BoundExpression,
 };
 
+pub enum TableRef {
+    BaseTable(BoundBaseTableRef),
+    ExprList(BoundExpressionListRef),
+}
+
 /**
  * A bound table ref type for single table. e.g.
 * `SELECT x FROM y`, where `y` is `BoundBaseTableRef`.
@@ -32,6 +37,10 @@ impl BoundBaseTableRef {
 
     pub fn bound_tbl_name(&self) -> &str {
         self.alias.as_ref().unwrap_or(&self.table_name)
+    }
+
+    pub fn schema(&self) -> &Schema {
+        &self.schema
     }
 }
 

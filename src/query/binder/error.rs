@@ -30,4 +30,13 @@ pub enum BinderError {
 
     #[error("values must match columns")]
     InsertValuesDoesntMatchColumns,
+
+    #[error("unsupported expression: {0}")]
+    UnsupportedExpression(String),
+
+    #[error("col is ambiguous in schema: {0}")]
+    AmbiguousColumn(String),
+
+    #[error("column not found: {0}")]
+    ColumnNotFound(String),
 }
