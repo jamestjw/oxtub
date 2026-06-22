@@ -27,4 +27,12 @@ impl<'a> TableInfo<'a> {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    pub fn table_oid(&self) -> TableId {
+        self.table_oid
+    }
+
+    pub fn schema(&self) -> Schema {
+        self.schema.clone()
+    }
 }

@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::catalog::error::CatalogError;
+
 #[derive(Debug, Error)]
 pub enum BinderError {
     #[error("duplicate column: {0}")]
@@ -10,4 +12,22 @@ pub enum BinderError {
 
     #[error("duplicate primary key column: {0}")]
     DuplicatePrimaryKeyColumn(String),
+
+    #[error("creating table without columns")]
+    CreateTableWithoutColumns,
+
+    #[error("table not found: {0}")]
+    TableNotFound(String),
+
+    #[error("illegal table name: {0}")]
+    InvalidTableName(String),
+
+    #[error("catalog error: {0}")]
+    Catalog(#[from] CatalogError),
+
+    #[error("values cannot be empty")]
+    InsertValuesEmpty,
+
+    #[error("values must match columns")]
+    InsertValuesDoesntMatchColumns,
 }

@@ -1,4 +1,10 @@
-use crate::catalog::column::Column;
+use crate::{
+    catalog::column::Column,
+    query::binder::{
+        expression::{BoundExpression, ColumnRef},
+        table_ref::{BoundBaseTableRef, BoundExpressionListRef},
+    },
+};
 
 #[derive(Debug)]
 pub enum BoundStatement {
@@ -17,7 +23,11 @@ pub enum BoundStatement {
 pub struct BoundSelect;
 
 #[derive(Debug)]
-pub struct BoundInsert;
+pub struct BoundInsert {
+    pub table: BoundBaseTableRef,
+    pub columns: Vec<ColumnRef>,
+    pub bound_exprs: BoundExpressionListRef,
+}
 
 #[derive(Debug)]
 pub struct BoundUpdate;

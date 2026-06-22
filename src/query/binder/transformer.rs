@@ -1,44 +1,138 @@
 use std::collections::HashSet;
 
 use crate::{
-    catalog::{column::Column, types::SqlType},
+    catalog::{column::Column, manager::Catalog, types::SqlType},
     query::{
         binder::{
             error::BinderError,
-            statement::{BoundCreateTable, BoundStatement},
+            expression::{BoundExpression, ColumnRef},
+            statement::{BoundCreateTable, BoundInsert, BoundSelect, BoundStatement},
+            table_ref::{BoundBaseTableRef, BoundExpressionListRef},
         },
-        statement::{CreateColumn, CreateTableStatement, Statement},
+        expression::Expression,
+        statement::{
+            CreateColumn, CreateTableStatement, InsertStatement, SelectStatement, Statement,
+        },
     },
 };
 
-pub fn bind_statement(stmt: Statement) -> Result<BoundStatement, BinderError> {
-    match stmt {
-        Statement::Select(select_statement) => todo!(),
-        Statement::Insert(insert_statement) => todo!(),
-        Statement::CreateTable(create_table_statement) => bind_create(create_table_statement),
-    }
+pub struct Binder<'catalog, 'bpm> {
+    catalog: &'catalog Catalog<'bpm>,
 }
 
-fn bind_create(stmt: CreateTableStatement) -> Result<BoundStatement, BinderError> {
-    let mut seen_columns = HashSet::new();
-    let mut columns = Vec::with_capacity(stmt.columns.len());
-
-    for column in stmt.columns {
-        let column_key = column.name.to_lowercase();
-        if !seen_columns.insert(column_key) {
-            return Err(BinderError::DuplicateColumn(column.name));
-        }
-
-        columns.push(bind_create_column(column));
+impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
+    pub fn new(catalog: &'catalog Catalog<'bpm>) -> Self {
+        Self { catalog }
     }
 
-    validate_primary_key(&stmt.primary_key, &columns)?;
+    pub fn bind_statement(&self, stmt: Statement) -> Result<BoundStatement, BinderError> {
+        match stmt {
+            Statement::Select(select_statement) => {
+                let select = self.bind_select(select_statement)?;
+                Ok(BoundStatement::Select(select))
+            }
+            Statement::Insert(insert_statement) => self.bind_insert(insert_statement),
+            Statement::CreateTable(create_table_statement) => {
+                self.bind_create_tbl(create_table_statement)
+            }
+        }
+    }
 
-    Ok(BoundStatement::CreateTable(BoundCreateTable {
-        name: stmt.table_name,
-        columns,
-        primary_key_cols: stmt.primary_key,
-    }))
+    fn bind_select(&self, stmt: SelectStatement) -> Result<BoundSelect, BinderError> {
+        todo!()
+    }
+
+    fn bind_create_tbl(&self, stmt: CreateTableStatement) -> Result<BoundStatement, BinderError> {
+        let mut seen_columns = HashSet::new();
+        let mut columns = Vec::with_capacity(stmt.columns.len());
+
+        for column in stmt.columns {
+            let column_key = column.name.to_lowercase();
+            if !seen_columns.insert(column_key) {
+                return Err(BinderError::DuplicateColumn(column.name));
+            }
+
+            columns.push(bind_create_column(column));
+        }
+
+        if columns.is_empty() {
+            return Err(BinderError::CreateTableWithoutColumns);
+        }
+
+        validate_primary_key(&stmt.primary_key, &columns)?;
+
+        Ok(BoundStatement::CreateTable(BoundCreateTable {
+            name: stmt.table_name,
+            columns,
+            primary_key_cols: stmt.primary_key,
+        }))
+    }
+
+    fn bind_insert(&self, stmt: InsertStatement) -> Result<BoundStatement, BinderError> {
+        if stmt.table_name.starts_with("__") {
+            return Err(BinderError::InvalidTableName(stmt.table_name));
+        }
+
+        match stmt.columns {
+            None => todo!("for now, columns must be specified"),
+            Some(columns) => {
+                let table = self.bind_base_table_ref(stmt.table_name.clone(), None)?;
+                let columns = columns
+                    .iter()
+                    .map(|col| ColumnRef::TableQualified {
+                        table: stmt.table_name.clone(),
+                        column: col.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let num_columns = columns.len();
+                Ok(BoundStatement::Insert(BoundInsert {
+                    table,
+                    columns,
+                    bound_exprs: self.bind_values_list(num_columns, stmt.values)?,
+                }))
+            }
+        }
+    }
+
+    // Bind values from an insert statement
+    fn bind_values_list(
+        &self,
+        num_cols: usize,
+        rows: Vec<Vec<Expression>>,
+    ) -> Result<BoundExpressionListRef, BinderError> {
+        if rows.is_empty() {
+            return Err(BinderError::InsertValuesEmpty);
+        }
+
+        let mut res = Vec::with_capacity(rows.len());
+
+        for row in rows {
+            if row.len() != num_cols {
+                return Err(BinderError::InsertValuesDoesntMatchColumns);
+            }
+            res.push(self.bind_expr_list(row)?);
+        }
+
+        Ok(BoundExpressionListRef::new(String::from("<unnamed>"), res))
+    }
+
+    fn bind_expr_list(&self, exprs: Vec<Expression>) -> Result<Vec<BoundExpression>, BinderError> {
+        todo!()
+    }
+
+    fn bind_base_table_ref(
+        &self,
+        table_name: String,
+        alias: Option<String>,
+    ) -> Result<BoundBaseTableRef, BinderError> {
+        let table_info = self.catalog.get_tbl_by_name(&table_name)?;
+        Ok(BoundBaseTableRef::new(
+            table_name,
+            table_info.table_oid(),
+            alias,
+            table_info.schema(),
+        ))
+    }
 }
 
 fn bind_create_column(column: CreateColumn) -> Column {
@@ -88,8 +182,13 @@ fn validate_primary_key(primary_key: &[String], columns: &[Column]) -> Result<()
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use tempfile::NamedTempFile;
 
-    use crate::query::{binder::statement::BoundStatement, parser::parse_sql};
+    use crate::{
+        buffer::bpm::BufferPoolManager,
+        query::{binder::statement::BoundStatement, parser::parse_sql},
+        storage::disk::disk_manager::DiskManager,
+    };
 
     use super::*;
 
@@ -100,11 +199,20 @@ mod tests {
         }
     }
 
+    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
+        BufferPoolManager::new(pool_size, disk_manager)
+    }
+
     #[test]
     fn binds_create_table_columns() {
+        let bpm = setup_bpm(3);
+        let catalog = Catalog::new(&bpm);
+        let binder = Binder::new(&catalog);
         let statement = parse_sql("create table users (id integer, name varchar(32))").unwrap();
 
-        let bound = bind_statement(statement).unwrap();
+        let bound = binder.bind_statement(statement).unwrap();
         let BoundStatement::CreateTable(create_table) = bound else {
             panic!("expected create table statement");
         };
@@ -137,12 +245,15 @@ mod tests {
 
     #[test]
     fn binds_create_table_primary_key() {
+        let bpm = setup_bpm(3);
+        let catalog = Catalog::new(&bpm);
+        let binder = Binder::new(&catalog);
         let statement = parse_sql(
             "create table users (tenant_id integer, id integer, primary key (tenant_id, id))",
         )
         .unwrap();
 
-        let bound = bind_statement(statement).unwrap();
+        let bound = binder.bind_statement(statement).unwrap();
         let BoundStatement::CreateTable(create_table) = bound else {
             panic!("expected create table statement");
         };
@@ -178,17 +289,23 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_create_table_columns() {
+        let bpm = setup_bpm(3);
+        let catalog = Catalog::new(&bpm);
+        let binder = Binder::new(&catalog);
         let statement = parse_sql("create table users (id integer, id integer)").unwrap();
-        let err = unwrap_binder_err(bind_statement(statement));
+        let err = unwrap_binder_err(binder.bind_statement(statement));
 
         assert!(matches!(err, BinderError::DuplicateColumn(column) if column == "id"));
     }
 
     #[test]
     fn rejects_missing_primary_key_column() {
+        let bpm = setup_bpm(3);
+        let catalog = Catalog::new(&bpm);
+        let binder = Binder::new(&catalog);
         let statement =
             parse_sql("create table users (id integer, primary key (missing))").unwrap();
-        let err = unwrap_binder_err(bind_statement(statement));
+        let err = unwrap_binder_err(binder.bind_statement(statement));
 
         assert!(
             matches!(err, BinderError::PrimaryKeyColumnNotFound(column) if column == "missing")
@@ -197,8 +314,11 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_primary_key_column() {
+        let bpm = setup_bpm(3);
+        let catalog = Catalog::new(&bpm);
+        let binder = Binder::new(&catalog);
         let statement = parse_sql("create table users (id integer, primary key (id, id))").unwrap();
-        let err = unwrap_binder_err(bind_statement(statement));
+        let err = unwrap_binder_err(binder.bind_statement(statement));
 
         assert!(matches!(err, BinderError::DuplicatePrimaryKeyColumn(column) if column == "id"));
     }
