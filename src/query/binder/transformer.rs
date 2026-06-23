@@ -18,15 +18,25 @@ use crate::{
 
 pub struct Binder<'catalog, 'bpm> {
     catalog: &'catalog Catalog<'bpm>,
-    scope: Option<TableRef>,
+}
+
+struct BindContext<'a> {
+    scope: Option<&'a TableRef>,
+}
+
+impl<'a> BindContext<'a> {
+    fn no_scope() -> Self {
+        Self { scope: None }
+    }
+
+    fn table_scope(table: &'a TableRef) -> Self {
+        Self { scope: Some(table) }
+    }
 }
 
 impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     pub fn new(catalog: &'catalog Catalog<'bpm>) -> Self {
-        Self {
-            catalog,
-            scope: None,
-        }
+        Self { catalog }
     }
 
     pub fn bind_statement(&self, stmt: Statement) -> Result<BoundStatement, BinderError> {
@@ -122,22 +132,27 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
         }
 
         let mut res = Vec::with_capacity(rows.len());
+        let context = BindContext::no_scope();
 
         for row in rows {
             if row.len() != num_cols {
                 return Err(BinderError::InsertValuesDoesntMatchColumns);
             }
-            res.push(self.bind_expr_list(row)?);
+            res.push(self.bind_expr_list(row, &context)?);
         }
 
         Ok(BoundExpressionListRef::new(String::from("<unnamed>"), res))
     }
 
-    fn bind_expr_list(&self, exprs: Vec<Expression>) -> Result<Vec<BoundExpression>, BinderError> {
+    fn bind_expr_list(
+        &self,
+        exprs: Vec<Expression>,
+        context: &BindContext<'_>,
+    ) -> Result<Vec<BoundExpression>, BinderError> {
         let mut res = Vec::with_capacity(exprs.len());
 
         for expr in exprs {
-            let expr = self.bind_expression(expr)?;
+            let expr = self.bind_expression(expr, context)?;
 
             if matches!(expr, BoundExpression::Star) {
                 return Err(BinderError::UnsupportedExpression(
@@ -151,38 +166,41 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
         Ok(res)
     }
 
-    fn bind_expression(&self, expr: Expression) -> Result<BoundExpression, BinderError> {
+    fn bind_expression(
+        &self,
+        expr: Expression,
+        context: &BindContext<'_>,
+    ) -> Result<BoundExpression, BinderError> {
         match expr {
             Expression::Literal(value) => Ok(BoundExpression::Literal(value)),
-            Expression::Column(c) => match &self.scope {
-                Some(_) => Ok(BoundExpression::Column(self.bind_column_ref(c)?)),
-                None => Err(BinderError::UnsupportedExpression(format!(
-                    "column reference `{c}` without table scope"
-                ))),
-            },
+            Expression::Column(c) => Ok(BoundExpression::Column(self.bind_column_ref(c, context)?)),
             Expression::UnaryOp { op, expr } => Ok(BoundExpression::UnaryOp {
                 op,
-                expr: Box::new(self.bind_expression(*expr)?),
+                expr: Box::new(self.bind_expression(*expr, context)?),
             }),
             Expression::BinaryOp { left, op, right } => Ok(BoundExpression::BinaryOp {
-                left: Box::new(self.bind_expression(*left)?),
+                left: Box::new(self.bind_expression(*left, context)?),
                 op,
-                right: Box::new(self.bind_expression(*right)?),
+                right: Box::new(self.bind_expression(*right, context)?),
             }),
         }
     }
 
-    fn bind_column_ref(&self, column: String) -> Result<ColumnRef, BinderError> {
-        // TODO: unsure yet if panicking here is right, ideally I would want to pass the scope
-        // in, hence ensuring that we always have it when we need it
-        match self.scope.as_ref().expect("should have scope") {
-            TableRef::BaseTable(bound_base_table_ref) => {
-                return Self::resolve_column_ref_from_base_table_ref(bound_base_table_ref, column);
+    fn bind_column_ref(
+        &self,
+        column: String,
+        context: &BindContext<'_>,
+    ) -> Result<ColumnRef, BinderError> {
+        match context.scope {
+            Some(TableRef::BaseTable(table)) => {
+                Self::resolve_column_ref_from_base_table_ref(table, column)
             }
-            // TODO: reconsider whether or not this should even be a table ref, if
-            // we don't need it as table ref after implementing everything, we should
-            // remove it
-            TableRef::ExprList(_) => panic!("unsupported column ref"),
+            Some(TableRef::ExprList(_)) => Err(BinderError::UnsupportedExpression(format!(
+                "column reference `{column}` in expression list scope"
+            ))),
+            None => Err(BinderError::UnsupportedExpression(format!(
+                "column reference `{column}` without table scope"
+            ))),
         }
     }
 
