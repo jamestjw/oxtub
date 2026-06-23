@@ -83,11 +83,8 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
                 let table = self.bind_base_table_ref(stmt.table_name.clone(), None)?;
                 let columns = columns
                     .iter()
-                    .map(|col| ColumnRef::TableQualified {
-                        table: stmt.table_name.clone(),
-                        column: col.clone(),
-                    })
-                    .collect::<Vec<_>>();
+                    .map(|col| Self::resolve_column_ref_from_base_table_ref(&table, col.clone()))
+                    .collect::<Result<Vec<_>, BinderError>>()?;
                 let num_columns = columns.len();
                 Ok(BoundStatement::Insert(BoundInsert {
                     table,
@@ -139,7 +136,7 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     }
 
     fn bind_expression(&self, expr: Expression) -> Result<BoundExpression, BinderError> {
-       match expr {
+        match expr {
             Expression::Literal(value) => Ok(BoundExpression::Literal(value)),
             Expression::Column(c) => match &self.scope {
                 Some(_) => Ok(BoundExpression::Column(self.bind_column_ref(c)?)),
@@ -160,7 +157,8 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     }
 
     fn bind_column_ref(&self, column: String) -> Result<ColumnRef, BinderError> {
-        // TODO: verify if this is truly an internal error
+        // TODO: unsure yet if panicking here is right, ideally I would want to pass the scope
+        // in, hence ensuring that we always have it when we need it
         match self.scope.as_ref().expect("should have scope") {
             TableRef::BaseTable(bound_base_table_ref) => {
                 return Self::resolve_column_ref_from_base_table_ref(bound_base_table_ref, column);
@@ -268,6 +266,7 @@ mod tests {
 
     use crate::{
         buffer::bpm::BufferPoolManager,
+        catalog::{column::Column, schema::Schema},
         query::{binder::statement::BoundStatement, parser::parse_sql},
         storage::disk::disk_manager::DiskManager,
     };
@@ -285,6 +284,15 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
         BufferPoolManager::new(pool_size, disk_manager)
+    }
+
+    fn create_users_table(catalog: &mut Catalog<'_>) {
+        let schema = Schema::new(&[
+            Column::new_static("id".to_string(), SqlType::Integer),
+            Column::new_variable("name".to_string(), SqlType::Varchar, 32),
+        ]);
+
+        catalog.create_tbl("users".to_string(), schema).unwrap();
     }
 
     #[test]
@@ -370,6 +378,92 @@ mod tests {
     }
 
     #[test]
+    fn binds_insert_with_columns_and_literal_values() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement =
+            parse_sql("insert into users (id, name) values (1, 'alice'), (2, 'bob')").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Insert(insert) = bound else {
+            panic!("expected insert statement");
+        };
+
+        expect![[r#"
+            BoundInsert {
+                table: BoundBaseTableRef {
+                    table_name: "users",
+                    table_oid: 0,
+                    alias: None,
+                    schema: Schema {
+                        inlined_storage_size: 9,
+                        columns: [
+                            Column {
+                                name: "id",
+                                sql_type: Integer,
+                                value_offset: 1,
+                                size: Inline(
+                                    4,
+                                ),
+                            },
+                            Column {
+                                name: "name",
+                                sql_type: Varchar,
+                                value_offset: 5,
+                                size: Variable(
+                                    32,
+                                ),
+                            },
+                        ],
+                        uninlined_columns: [
+                            1,
+                        ],
+                    },
+                },
+                columns: [
+                    Unqualified {
+                        column: "id",
+                    },
+                    Unqualified {
+                        column: "name",
+                    },
+                ],
+                bound_exprs: BoundExpressionListRef {
+                    identifier: "<unnamed>",
+                    values: [
+                        [
+                            Literal(
+                                Integer(
+                                    1,
+                                ),
+                            ),
+                            Literal(
+                                Varchar(
+                                    "alice",
+                                ),
+                            ),
+                        ],
+                        [
+                            Literal(
+                                Integer(
+                                    2,
+                                ),
+                            ),
+                            Literal(
+                                Varchar(
+                                    "bob",
+                                ),
+                            ),
+                        ],
+                    ],
+                },
+            }"#]]
+        .assert_eq(&format!("{insert:#?}"));
+    }
+
+    #[test]
     fn rejects_duplicate_create_table_columns() {
         let bpm = setup_bpm(3);
         let catalog = Catalog::new(&bpm);
@@ -378,6 +472,61 @@ mod tests {
         let err = unwrap_binder_err(binder.bind_statement(statement));
 
         assert!(matches!(err, BinderError::DuplicateColumn(column) if column == "id"));
+    }
+
+    #[test]
+    fn rejects_insert_unknown_column() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("insert into users (missing) values (1)").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::ColumnNotFound(column) if column == "missing"));
+    }
+
+    #[test]
+    fn rejects_insert_values_that_do_not_match_columns() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("insert into users (id, name) values (1)").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::InsertValuesDoesntMatchColumns));
+    }
+
+    #[test]
+    fn rejects_column_refs_in_insert_values_without_scope() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("insert into users (id) values (id)").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(
+            matches!(err, BinderError::UnsupportedExpression(message) if message.contains("without table scope"))
+        );
+    }
+
+    #[test]
+    #[ignore = "insert without explicit columns is not implemented yet"]
+    fn binds_insert_without_columns_using_schema_order() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("insert into users values (1, 'alice')").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Insert(insert) = bound else {
+            panic!("expected insert statement");
+        };
+
+        assert_eq!(2, insert.columns.len());
     }
 
     #[test]
