@@ -5,7 +5,7 @@ use crate::{
     query::{
         binder::{
             error::BinderError,
-            expression::{BoundExpression, ColumnRef},
+            expression::{BoundExpression, ColumnRef, are_column_refs_unique},
             statement::{BoundCreateTable, BoundInsert, BoundSelect, BoundStatement},
             table_ref::{BoundBaseTableRef, BoundExpressionListRef, TableRef},
         },
@@ -77,22 +77,38 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
             return Err(BinderError::InvalidTableName(stmt.table_name));
         }
 
-        match stmt.columns {
-            None => todo!("for now, columns must be specified"),
+        let table = self.bind_base_table_ref(stmt.table_name.clone(), None)?;
+        let columns = match stmt.columns {
+            None => Self::bind_columns_from_schema(table.schema()),
             Some(columns) => {
-                let table = self.bind_base_table_ref(stmt.table_name.clone(), None)?;
                 let columns = columns
                     .iter()
                     .map(|col| Self::resolve_column_ref_from_base_table_ref(&table, col.clone()))
                     .collect::<Result<Vec<_>, BinderError>>()?;
-                let num_columns = columns.len();
-                Ok(BoundStatement::Insert(BoundInsert {
-                    table,
-                    columns,
-                    bound_exprs: self.bind_values_list(num_columns, stmt.values)?,
-                }))
+
+                if !are_column_refs_unique(&columns) {
+                    return Err(BinderError::DuplicateInsertColumns);
+                }
+                columns
             }
-        }
+        };
+
+        let num_columns = columns.len();
+        Ok(BoundStatement::Insert(BoundInsert {
+            table,
+            columns,
+            bound_exprs: self.bind_values_list(num_columns, stmt.values)?,
+        }))
+    }
+
+    fn bind_columns_from_schema(schema: &Schema) -> Vec<ColumnRef> {
+        schema
+            .columns()
+            .iter()
+            .map(|col| ColumnRef::Unqualified {
+                column: col.name().to_string(),
+            })
+            .collect()
     }
 
     // Bind values from an insert statement
@@ -513,7 +529,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "insert without explicit columns is not implemented yet"]
     fn binds_insert_without_columns_using_schema_order() {
         let bpm = setup_bpm(3);
         let mut catalog = Catalog::new(&bpm);
@@ -526,7 +541,100 @@ mod tests {
             panic!("expected insert statement");
         };
 
-        assert_eq!(2, insert.columns.len());
+        expect![[r#"
+            BoundInsert {
+                table: BoundBaseTableRef {
+                    table_name: "users",
+                    table_oid: 0,
+                    alias: None,
+                    schema: Schema {
+                        inlined_storage_size: 9,
+                        columns: [
+                            Column {
+                                name: "id",
+                                sql_type: Integer,
+                                value_offset: 1,
+                                size: Inline(
+                                    4,
+                                ),
+                            },
+                            Column {
+                                name: "name",
+                                sql_type: Varchar,
+                                value_offset: 5,
+                                size: Variable(
+                                    32,
+                                ),
+                            },
+                        ],
+                        uninlined_columns: [
+                            1,
+                        ],
+                    },
+                },
+                columns: [
+                    Unqualified {
+                        column: "id",
+                    },
+                    Unqualified {
+                        column: "name",
+                    },
+                ],
+                bound_exprs: BoundExpressionListRef {
+                    identifier: "<unnamed>",
+                    values: [
+                        [
+                            Literal(
+                                Integer(
+                                    1,
+                                ),
+                            ),
+                            Literal(
+                                Varchar(
+                                    "alice",
+                                ),
+                            ),
+                        ],
+                    ],
+                },
+            }"#]]
+        .assert_eq(&format!("{insert:#?}"));
+    }
+
+    #[test]
+    fn rejects_duplicate_insert_columns() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("insert into users (id, id) values (1, 2)").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::DuplicateInsertColumns));
+    }
+
+    #[test]
+    fn rejects_insert_without_columns_when_values_exceed_schema_columns() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("insert into users values (1, 'alice', true)").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::InsertValuesDoesntMatchColumns));
+    }
+
+    #[test]
+    fn rejects_insert_without_columns_when_values_are_missing_schema_columns() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("insert into users values (1)").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::InsertValuesDoesntMatchColumns));
     }
 
     #[test]

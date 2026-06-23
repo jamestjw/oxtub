@@ -37,6 +37,9 @@ pub enum BinderError {
     #[error("col is ambiguous in schema: {0}")]
     AmbiguousColumn(String),
 
+    #[error("duplicated columns in insert")]
+    DuplicateInsertColumns,
+
     #[error("column not found: {0}")]
     ColumnNotFound(String),
 }
