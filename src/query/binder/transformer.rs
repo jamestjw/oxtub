@@ -139,14 +139,24 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     }
 
     fn bind_expression(&self, expr: Expression) -> Result<BoundExpression, BinderError> {
-        let res = match expr {
-            Expression::Column(c) => BoundExpression::Column(self.bind_column_ref(c)?),
-            Expression::Literal(value) => todo!(),
-            Expression::UnaryOp { op, expr } => todo!(),
-            Expression::BinaryOp { left, op, right } => todo!(),
-        };
-
-        Ok(res)
+       match expr {
+            Expression::Literal(value) => Ok(BoundExpression::Literal(value)),
+            Expression::Column(c) => match &self.scope {
+                Some(_) => Ok(BoundExpression::Column(self.bind_column_ref(c)?)),
+                None => Err(BinderError::UnsupportedExpression(format!(
+                    "column reference `{c}` without table scope"
+                ))),
+            },
+            Expression::UnaryOp { op, expr } => Ok(BoundExpression::UnaryOp {
+                op,
+                expr: Box::new(self.bind_expression(*expr)?),
+            }),
+            Expression::BinaryOp { left, op, right } => Ok(BoundExpression::BinaryOp {
+                left: Box::new(self.bind_expression(*left)?),
+                op,
+                right: Box::new(self.bind_expression(*right)?),
+            }),
+        }
     }
 
     fn bind_column_ref(&self, column: String) -> Result<ColumnRef, BinderError> {
