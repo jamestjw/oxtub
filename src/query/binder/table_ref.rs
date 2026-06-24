@@ -3,6 +3,7 @@ use crate::{
     query::binder::expression::BoundExpression,
 };
 
+#[derive(Debug)]
 pub enum TableRef {
     BaseTable(BoundBaseTableRef),
     ExprList(BoundExpressionListRef),

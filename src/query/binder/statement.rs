@@ -2,7 +2,7 @@ use crate::{
     catalog::column::Column,
     query::binder::{
         expression::{BoundExpression, ColumnRef},
-        table_ref::{BoundBaseTableRef, BoundExpressionListRef},
+        table_ref::{BoundBaseTableRef, BoundExpressionListRef, TableRef},
     },
 };
 
@@ -20,7 +20,11 @@ pub enum BoundStatement {
 }
 
 #[derive(Debug)]
-pub struct BoundSelect;
+pub struct BoundSelect {
+    pub table: TableRef,
+    pub projection: Vec<BoundExpression>,
+    pub where_: Option<BoundExpression>,
+}
 
 #[derive(Debug)]
 pub struct BoundInsert {

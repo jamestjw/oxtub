@@ -11,7 +11,8 @@ use crate::{
         },
         expression::Expression,
         statement::{
-            CreateColumn, CreateTableStatement, InsertStatement, SelectStatement, Statement,
+            CreateColumn, CreateTableStatement, InsertStatement, SelectItem, SelectStatement,
+            Statement,
         },
     },
 };
@@ -53,7 +54,65 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     }
 
     fn bind_select(&self, stmt: SelectStatement) -> Result<BoundSelect, BinderError> {
-        todo!()
+        // TODO: should support aliases!
+        // TODO: can also select without a From clause
+        let tbl_ref = TableRef::BaseTable(self.bind_base_table_ref(stmt.table_name, None)?);
+        let context = BindContext::table_scope(&tbl_ref);
+        let projection = self.bind_select_list(stmt.projection, &context)?;
+        let where_ = match stmt.where_clause {
+            None => None,
+            Some(expr) => Some(self.bind_expression(expr, &context)?),
+        };
+
+        Ok(BoundSelect {
+            table: tbl_ref,
+            projection,
+            where_,
+        })
+    }
+
+    fn bind_select_list(
+        &self,
+        select_item: Vec<SelectItem>,
+        context: &BindContext,
+    ) -> Result<Vec<BoundExpression>, BinderError> {
+        let mut res = vec![];
+
+        for s in select_item {
+            match s {
+                SelectItem::Wildcard => {
+                    res.extend(Self::get_all_cols_from_scope(context)?);
+                }
+                SelectItem::Expression(expression) => {
+                    res.push(self.bind_expression(expression, context)?);
+                }
+            }
+        }
+
+        if res.is_empty() {
+            return Err(BinderError::EmptySelectProjection);
+        }
+
+        Ok(res)
+    }
+
+    fn get_all_cols_from_scope(context: &BindContext) -> Result<Vec<BoundExpression>, BinderError> {
+        match context.scope.expect("should have scope") {
+            TableRef::BaseTable(bound_base_table_ref) => {
+                let tbl_name = bound_base_table_ref.bound_tbl_name();
+                let cols = bound_base_table_ref.schema().columns();
+                let mut res = Vec::with_capacity(cols.len());
+                for col in cols {
+                    res.push(BoundExpression::Column(ColumnRef::TableQualified {
+                        table: tbl_name.into(),
+                        column: col.name().into(),
+                    }));
+                }
+
+                Ok(res)
+            }
+            TableRef::ExprList(_) => panic!("select * should not use this table ref"),
+        }
     }
 
     fn bind_create_tbl(&self, stmt: CreateTableStatement) -> Result<BoundStatement, BinderError> {
@@ -186,6 +245,8 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
         }
     }
 
+    // todo: handle column refs that are qualified
+    // todo: when doing the above, handle the case where aliases can cause ambiguity
     fn bind_column_ref(
         &self,
         column: String,
@@ -210,7 +271,11 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     ) -> Result<ColumnRef, BinderError> {
         match Self::resolve_column_ref_schema(base_table_ref.schema(), &col_name)? {
             None => Err(BinderError::ColumnNotFound(col_name)),
-            Some(column_ref) => Ok(column_ref),
+            Some(ColumnRef::Unqualified { column }) => Ok(ColumnRef::TableQualified {
+                table: base_table_ref.bound_tbl_name().into(),
+                column,
+            }),
+            Some(c) => Ok(c),
         }
     }
 
@@ -457,10 +522,12 @@ mod tests {
                     },
                 },
                 columns: [
-                    Unqualified {
+                    TableQualified {
+                        table: "users",
                         column: "id",
                     },
-                    Unqualified {
+                    TableQualified {
+                        table: "users",
                         column: "name",
                     },
                 ],

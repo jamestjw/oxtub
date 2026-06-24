@@ -42,4 +42,7 @@ pub enum BinderError {
 
     #[error("column not found: {0}")]
     ColumnNotFound(String),
+
+    #[error("must select something")]
+    EmptySelectProjection,
 }
