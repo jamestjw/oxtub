@@ -97,8 +97,11 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     }
 
     fn get_all_cols_from_scope(context: &BindContext) -> Result<Vec<BoundExpression>, BinderError> {
-        match context.scope.expect("should have scope") {
-            TableRef::BaseTable(bound_base_table_ref) => {
+        match context.scope {
+            None => Err(BinderError::UnsupportedExpression(
+                "select * without table scope".into(),
+            )),
+            Some(TableRef::BaseTable(bound_base_table_ref)) => {
                 let tbl_name = bound_base_table_ref.bound_tbl_name();
                 let cols = bound_base_table_ref.schema().columns();
                 let mut res = Vec::with_capacity(cols.len());
@@ -111,7 +114,7 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
 
                 Ok(res)
             }
-            TableRef::ExprList(_) => panic!("select * should not use this table ref"),
+            Some(TableRef::ExprList(_)) => panic!("select * should not use this table ref"),
         }
     }
 
@@ -562,6 +565,143 @@ mod tests {
                 },
             }"#]]
         .assert_eq(&format!("{insert:#?}"));
+    }
+
+    #[test]
+    fn binds_select_wildcard() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("select * from users").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Select(select) = bound else {
+            panic!("expected select statement");
+        };
+
+        assert_eq!(
+            select.projection,
+            vec![
+                BoundExpression::Column(ColumnRef::TableQualified {
+                    table: "users".to_string(),
+                    column: "id".to_string(),
+                }),
+                BoundExpression::Column(ColumnRef::TableQualified {
+                    table: "users".to_string(),
+                    column: "name".to_string(),
+                }),
+            ]
+        );
+        assert_eq!(select.where_, None);
+    }
+
+    #[test]
+    fn binds_select_columns() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("select id, name from users").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Select(select) = bound else {
+            panic!("expected select statement");
+        };
+
+        assert_eq!(
+            select.projection,
+            vec![
+                BoundExpression::Column(ColumnRef::TableQualified {
+                    table: "users".to_string(),
+                    column: "id".to_string(),
+                }),
+                BoundExpression::Column(ColumnRef::TableQualified {
+                    table: "users".to_string(),
+                    column: "name".to_string(),
+                }),
+            ]
+        );
+        assert_eq!(select.where_, None);
+    }
+
+    #[test]
+    fn binds_select_where_clause() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("select id from users where id = 1").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Select(select) = bound else {
+            panic!("expected select statement");
+        };
+
+        assert_eq!(
+            select.projection,
+            vec![BoundExpression::Column(ColumnRef::TableQualified {
+                table: "users".to_string(),
+                column: "id".to_string(),
+            })]
+        );
+        expect![[r#"
+            Some(
+                BinaryOp {
+                    left: Column(
+                        TableQualified {
+                            table: "users",
+                            column: "id",
+                        },
+                    ),
+                    op: Eq,
+                    right: Literal(
+                        Integer(
+                            1,
+                        ),
+                    ),
+                },
+            )"#]]
+        .assert_eq(&format!("{:#?}", select.where_));
+    }
+
+    #[test]
+    fn rejects_select_unknown_column() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("select missing from users").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::ColumnNotFound(column) if column == "missing"));
+    }
+
+    #[test]
+    fn rejects_select_unknown_table() {
+        let bpm = setup_bpm(3);
+        let catalog = Catalog::new(&bpm);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("select id from users").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::Catalog(_)));
+    }
+
+    #[test]
+    fn rejects_empty_select_projection() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = Statement::Select(SelectStatement {
+            table_name: "users".to_string(),
+            projection: vec![],
+            where_clause: None,
+        });
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::EmptySelectProjection));
     }
 
     #[test]
