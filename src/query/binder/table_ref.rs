@@ -36,6 +36,10 @@ impl BoundBaseTableRef {
         }
     }
 
+    pub fn tbl_name(&self) -> &str {
+        &self.table_name
+    }
+
     pub fn bound_tbl_name(&self) -> &str {
         self.alias.as_ref().unwrap_or(&self.table_name)
     }

@@ -216,12 +216,6 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
         for expr in exprs {
             let expr = self.bind_expression(expr, context)?;
 
-            if matches!(expr, BoundExpression::Star) {
-                return Err(BinderError::UnsupportedExpression(
-                    "unsupported * in expr list".into(),
-                ));
-            }
-
             res.push(expr);
         }
 

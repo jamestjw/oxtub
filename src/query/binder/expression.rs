@@ -15,7 +15,6 @@ pub enum ColumnRef {
 pub enum BoundExpression {
     Literal(Value),
     Column(ColumnRef),
-    Star,
     BinaryOp {
         left: Box<BoundExpression>,
         op: BinaryOperator,

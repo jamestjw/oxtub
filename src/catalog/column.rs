@@ -36,6 +36,13 @@ impl Column {
         }
     }
 
+    pub fn with_new_name(&self, name: String) -> Self {
+        Self {
+            name,
+            ..self.clone()
+        }
+    }
+
     pub fn sql_type(&self) -> SqlType {
         self.sql_type
     }
