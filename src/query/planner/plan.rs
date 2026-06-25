@@ -65,6 +65,30 @@ pub struct ProjectionPlan {
     pub child: Box<PlanNode>,
 }
 
+impl ProjectionPlan {
+    // Infer the schema based on the exprs we are projecting
+    pub fn infer_proj_schema(exprs: &[PlannedExpression]) -> Schema {
+        let columns = exprs
+            .iter()
+            .map(|col| col.return_type.with_new_name("<unnamed>".into()))
+            .collect::<Vec<_>>();
+        Schema::new(&columns)
+    }
+
+    pub fn rename_schema(schema: &Schema, names: &[String]) -> Schema {
+        assert_eq!(schema.num_columns(), names.len());
+
+        let columns = schema
+            .columns()
+            .iter()
+            .zip(names)
+            .map(|(col, name)| col.with_new_name(name.clone()))
+            .collect::<Vec<_>>();
+
+        Schema::new(&columns)
+    }
+}
+
 #[derive(Debug)]
 pub struct ValuesPlan {
     pub rows: Vec<Vec<PlannedExpression>>,
