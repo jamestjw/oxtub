@@ -7,7 +7,19 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub enum PlanNode {
+pub struct PlanNode {
+    pub output_schema: Schema,
+    pub kind: PlanNodeKind,
+}
+
+impl PlanNode {
+    pub fn output_schema(&self) -> &Schema {
+        &self.output_schema
+    }
+}
+
+#[derive(Debug)]
+pub enum PlanNodeKind {
     SeqScan(SeqScanPlan),
     Filter(FilterPlan),
     Projection(ProjectionPlan),
@@ -20,7 +32,6 @@ pub enum PlanNode {
 pub struct SeqScanPlan {
     pub table_name: String,
     pub table_oid: TableId,
-    pub output_schema: Schema,
 }
 
 impl SeqScanPlan {

@@ -2,12 +2,14 @@ use crate::{
     catalog::manager::Catalog,
     query::{
         binder::{
+            expression::BoundExpression,
             statement::{BoundSelect, BoundStatement},
             table_ref::TableRef,
         },
         planner::{
             error::PlannerError,
-            plan::{PlanNode, SeqScanPlan},
+            expression::PlannedExpression,
+            plan::{FilterPlan, PlanNode, PlanNodeKind, SeqScanPlan},
         },
     },
 };
@@ -36,7 +38,22 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
     }
 
     fn plan_select(&self, stmt: BoundSelect) -> Result<PlanNode, PlannerError> {
-        let tbl_ref_plan = self.plan_table_ref(stmt.table)?;
+        let plan = self.plan_table_ref(stmt.table)?;
+        let plan = match stmt.where_ {
+            None => plan,
+            Some(where_expr) => {
+                let schema = plan.output_schema().clone();
+                let (_, expr) = self.plan_expression(where_expr, vec![&plan])?;
+
+                PlanNode {
+                    output_schema: schema,
+                    kind: PlanNodeKind::Filter(FilterPlan {
+                        predicate: expr,
+                        child: Box::new(plan),
+                    }),
+                }
+            }
+        };
         todo!()
     }
 
@@ -48,15 +65,25 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                     .get_tbl_by_name(bound_base_table_ref.tbl_name())?;
 
                 // TODO: maybe handle internal tables?
-                Ok(PlanNode::SeqScan(SeqScanPlan {
-                    table_name: String::from(bound_base_table_ref.tbl_name()),
-                    table_oid: tbl_info.table_oid(),
+                Ok(PlanNode {
                     output_schema: SeqScanPlan::infer_scan_schema(&bound_base_table_ref),
-                }))
+                    kind: PlanNodeKind::SeqScan(SeqScanPlan {
+                        table_name: String::from(bound_base_table_ref.tbl_name()),
+                        table_oid: tbl_info.table_oid(),
+                    }),
+                })
             }
             TableRef::ExprList(bound_expression_list_ref) => {
                 panic!("planner does not support ExprList")
             }
         }
+    }
+
+    fn plan_expression(
+        &self,
+        expr: BoundExpression,
+        children: Vec<&PlanNode>,
+    ) -> Result<(Option<String>, PlannedExpression), PlannerError> {
+        todo!()
     }
 }
