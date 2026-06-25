@@ -8,7 +8,7 @@ use crate::{
         },
         planner::{
             error::PlannerError,
-            expression::PlannedExpression,
+            expression::{ConstantValueExpression, PlannedExpression, PlannedExpressionKind},
             plan::{FilterPlan, PlanNode, PlanNodeKind, ProjectionPlan, SeqScanPlan},
         },
     },
@@ -112,6 +112,17 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         expr: BoundExpression,
         children: Vec<&PlanNode>,
     ) -> Result<(Option<String>, PlannedExpression), PlannerError> {
-        todo!()
+        match expr {
+            BoundExpression::Literal(value) => Ok((
+                None,
+                PlannedExpression {
+                    return_type: value.get_type_as_col(),
+                    kind: PlannedExpressionKind::ConstantValue(ConstantValueExpression { value }),
+                },
+            )),
+            BoundExpression::Column(column_ref) => todo!(),
+            BoundExpression::BinaryOp { left, op, right } => todo!(),
+            BoundExpression::UnaryOp { expr, op } => todo!(),
+        }
     }
 }

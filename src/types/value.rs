@@ -1,4 +1,7 @@
-use crate::{catalog::types::SqlType, storage::table::tuple::VarSize};
+use crate::{
+    catalog::{column::Column, types::SqlType},
+    storage::table::tuple::VarSize,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -78,6 +81,17 @@ impl Value {
                 let s = String::from_utf8(data[start..end].to_vec()).unwrap();
                 Value::Varchar(s)
             }
+        }
+    }
+
+    pub fn get_type_as_col(&self) -> Column {
+        match self.sql_type() {
+            SqlType::Varchar => Column::new_variable(
+                String::from("<val>"),
+                SqlType::Varchar,
+                self.variable_storage_size(),
+            ),
+            sql_type => Column::new_static(String::from("<val>"), sql_type),
         }
     }
 }
