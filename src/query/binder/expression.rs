@@ -11,6 +11,15 @@ pub enum ColumnRef {
     TableQualified { table: String, column: String },
 }
 
+impl ColumnRef {
+    pub fn to_str(&self) -> String {
+        match self {
+            ColumnRef::Unqualified { column } => column.clone(),
+            ColumnRef::TableQualified { table, column } => format!("{table}.{column}"),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum BoundExpression {
     Literal(Value),

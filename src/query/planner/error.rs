@@ -9,4 +9,7 @@ pub enum PlannerError {
 
     #[error("catalog error: {0}")]
     Catalog(#[from] CatalogError),
+
+    #[error("more than one column with name: {0}")]
+    AmbiguousColumn(String),
 }

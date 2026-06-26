@@ -20,6 +20,7 @@ pub enum PlannedExpressionKind {
 
 #[derive(Debug)]
 pub struct ColumnValueExpression {
+    // which child the column is from
     pub tuple_idx: usize,
     pub col_idx: usize,
 }

@@ -8,7 +8,10 @@ use crate::{
         },
         planner::{
             error::PlannerError,
-            expression::{ConstantValueExpression, PlannedExpression, PlannedExpressionKind},
+            expression::{
+                ColumnValueExpression, ConstantValueExpression, PlannedExpression,
+                PlannedExpressionKind,
+            },
             plan::{FilterPlan, PlanNode, PlanNodeKind, ProjectionPlan, SeqScanPlan},
         },
     },
@@ -120,7 +123,37 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                     kind: PlannedExpressionKind::ConstantValue(ConstantValueExpression { value }),
                 },
             )),
-            BoundExpression::Column(column_ref) => todo!(),
+            BoundExpression::Column(column_ref) => match children[..] {
+                [child] => {
+                    let col_name = column_ref.to_str();
+                    let child_schema = child.output_schema();
+                    let matched_columns = child_schema
+                        .columns()
+                        .iter()
+                        .enumerate()
+                        // Binder normalizes column refs to schema casing and scan schemas
+                        // use the same qualified names.
+                        .filter(|(_, col)| col.name() == col_name)
+                        .collect::<Vec<_>>();
+
+                    match matched_columns[..] {
+                        [] => panic!("should not be possible as binder would have caught this?"),
+                        [(idx, col)] => Ok((
+                            Some(col_name),
+                            PlannedExpression {
+                                return_type: col.clone(),
+                                kind: PlannedExpressionKind::ColumnValue(ColumnValueExpression {
+                                    tuple_idx: 0,
+                                    col_idx: idx,
+                                }),
+                            },
+                        )),
+                        _ => Err(PlannerError::AmbiguousColumn(col_name)),
+                    }
+                }
+                [_left, _right] => todo!("binder doesnt support joins yet!"),
+                _ => panic!("cannot occur"),
+            },
             BoundExpression::BinaryOp { left, op, right } => todo!(),
             BoundExpression::UnaryOp { expr, op } => todo!(),
         }
