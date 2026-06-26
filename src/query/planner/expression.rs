@@ -1,12 +1,51 @@
 use crate::{
-    catalog::column::Column,
+    catalog::{column::Column, types::SqlType},
     query::expression::{BinaryOperator, UnaryOperator},
     types::value::Value,
 };
 
+#[derive(Debug, Clone, Copy)]
+pub struct ExpressionType {
+    pub sql_type: SqlType,
+    pub varchar_size: Option<usize>,
+}
+
+impl ExpressionType {
+    pub fn from_column(column: &Column) -> Self {
+        Self {
+            sql_type: column.sql_type(),
+            varchar_size: if column.sql_type() == SqlType::Varchar {
+                Some(column.storage_size())
+            } else {
+                None
+            },
+        }
+    }
+
+    pub fn from_value(value: &Value) -> Self {
+        Self {
+            sql_type: value.sql_type(),
+            varchar_size: match value {
+                Value::Varchar(s) => Some(s.len()),
+                Value::Null(SqlType::Varchar) => Some(0),
+                _ => None,
+            },
+        }
+    }
+
+    pub fn to_column(self, name: String) -> Column {
+        match self.sql_type {
+            SqlType::Varchar => {
+                Column::new_variable(name, SqlType::Varchar, self.varchar_size.unwrap_or(0))
+            }
+            sql_type => Column::new_static(name, sql_type),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PlannedExpression {
-    pub return_type: Column,
+    pub return_type: ExpressionType,
     pub kind: PlannedExpressionKind,
 }
 

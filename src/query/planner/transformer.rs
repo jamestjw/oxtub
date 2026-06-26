@@ -9,7 +9,7 @@ use crate::{
         planner::{
             error::PlannerError,
             expression::{
-                ColumnValueExpression, ConstantValueExpression, PlannedExpression,
+                ColumnValueExpression, ConstantValueExpression, ExpressionType, PlannedExpression,
                 PlannedExpressionKind,
             },
             plan::{FilterPlan, PlanNode, PlanNodeKind, ProjectionPlan, SeqScanPlan},
@@ -119,7 +119,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             BoundExpression::Literal(value) => Ok((
                 None,
                 PlannedExpression {
-                    return_type: value.get_type_as_col(),
+                    return_type: ExpressionType::from_value(&value),
                     kind: PlannedExpressionKind::ConstantValue(ConstantValueExpression { value }),
                 },
             )),
@@ -141,7 +141,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                         [(idx, col)] => Ok((
                             Some(col_name),
                             PlannedExpression {
-                                return_type: col.clone(),
+                                return_type: ExpressionType::from_column(col),
                                 kind: PlannedExpressionKind::ColumnValue(ColumnValueExpression {
                                     tuple_idx: 0,
                                     col_idx: idx,
@@ -204,19 +204,19 @@ mod tests {
         let mut catalog = Catalog::new(&bpm);
         create_users_table(&mut catalog);
 
-        let plan = plan_sql(&catalog, "select id, 1 from users");
+        let plan = plan_sql(&catalog, "select name, 1, id from users");
 
         expect![[r#"
             PlanNode {
                 output_schema: Schema {
-                    inlined_storage_size: 9,
+                    inlined_storage_size: 13,
                     columns: [
                         Column {
-                            name: "users.id",
-                            sql_type: Integer,
+                            name: "users.name",
+                            sql_type: Varchar,
                             value_offset: 1,
-                            size: Inline(
-                                4,
+                            size: Variable(
+                                32,
                             ),
                         },
                         Column {
@@ -227,42 +227,58 @@ mod tests {
                                 4,
                             ),
                         },
+                        Column {
+                            name: "users.id",
+                            sql_type: Integer,
+                            value_offset: 9,
+                            size: Inline(
+                                4,
+                            ),
+                        },
                     ],
-                    uninlined_columns: [],
+                    uninlined_columns: [
+                        0,
+                    ],
                 },
                 kind: Projection(
                     ProjectionPlan {
                         expressions: [
                             PlannedExpression {
-                                return_type: Column {
-                                    name: "users.id",
-                                    sql_type: Integer,
-                                    value_offset: 1,
-                                    size: Inline(
-                                        4,
+                                return_type: ExpressionType {
+                                    sql_type: Varchar,
+                                    varchar_size: Some(
+                                        32,
                                     ),
                                 },
                                 kind: ColumnValue(
                                     ColumnValueExpression {
                                         tuple_idx: 0,
-                                        col_idx: 0,
+                                        col_idx: 1,
                                     },
                                 ),
                             },
                             PlannedExpression {
-                                return_type: Column {
-                                    name: "<val>",
+                                return_type: ExpressionType {
                                     sql_type: Integer,
-                                    value_offset: 0,
-                                    size: Inline(
-                                        4,
-                                    ),
+                                    varchar_size: None,
                                 },
                                 kind: ConstantValue(
                                     ConstantValueExpression {
                                         value: Integer(
                                             1,
                                         ),
+                                    },
+                                ),
+                            },
+                            PlannedExpression {
+                                return_type: ExpressionType {
+                                    sql_type: Integer,
+                                    varchar_size: None,
+                                },
+                                kind: ColumnValue(
+                                    ColumnValueExpression {
+                                        tuple_idx: 0,
+                                        col_idx: 0,
                                     },
                                 ),
                             },

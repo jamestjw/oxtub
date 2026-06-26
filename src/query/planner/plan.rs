@@ -70,7 +70,7 @@ impl ProjectionPlan {
     pub fn infer_proj_schema(exprs: &[PlannedExpression]) -> Schema {
         let columns = exprs
             .iter()
-            .map(|col| col.return_type.with_new_name("<unnamed>".into()))
+            .map(|expr| expr.return_type.to_column("<unnamed>".into()))
             .collect::<Vec<_>>();
         Schema::new(&columns)
     }
