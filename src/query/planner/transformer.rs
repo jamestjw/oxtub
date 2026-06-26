@@ -159,3 +159,149 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use expect_test::expect;
+    use tempfile::NamedTempFile;
+
+    use crate::{
+        buffer::bpm::BufferPoolManager,
+        catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
+        query::{binder::transformer::Binder, parser::parse_sql},
+        storage::disk::disk_manager::DiskManager,
+    };
+
+    use super::*;
+
+    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
+        BufferPoolManager::new(pool_size, disk_manager)
+    }
+
+    fn create_users_table(catalog: &mut Catalog<'_>) {
+        let schema = Schema::new(&[
+            Column::new_static("id".to_string(), SqlType::Integer),
+            Column::new_variable("name".to_string(), SqlType::Varchar, 32),
+        ]);
+
+        catalog.create_tbl("users".to_string(), schema).unwrap();
+    }
+
+    fn plan_sql(catalog: &Catalog<'_>, sql: &str) -> PlanNode {
+        let binder = Binder::new(catalog);
+        let planner = Planner::new(catalog);
+        let statement = parse_sql(sql).unwrap();
+        let bound = binder.bind_statement(statement).unwrap();
+
+        planner.plan_statement(bound).unwrap()
+    }
+
+    #[test]
+    fn plans_select_column_and_literal_projection() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        let plan = plan_sql(&catalog, "select id, 1 from users");
+
+        expect![[r#"
+            PlanNode {
+                output_schema: Schema {
+                    inlined_storage_size: 9,
+                    columns: [
+                        Column {
+                            name: "users.id",
+                            sql_type: Integer,
+                            value_offset: 1,
+                            size: Inline(
+                                4,
+                            ),
+                        },
+                        Column {
+                            name: "__unnamed#1",
+                            sql_type: Integer,
+                            value_offset: 5,
+                            size: Inline(
+                                4,
+                            ),
+                        },
+                    ],
+                    uninlined_columns: [],
+                },
+                kind: Projection(
+                    ProjectionPlan {
+                        expressions: [
+                            PlannedExpression {
+                                return_type: Column {
+                                    name: "users.id",
+                                    sql_type: Integer,
+                                    value_offset: 1,
+                                    size: Inline(
+                                        4,
+                                    ),
+                                },
+                                kind: ColumnValue(
+                                    ColumnValueExpression {
+                                        tuple_idx: 0,
+                                        col_idx: 0,
+                                    },
+                                ),
+                            },
+                            PlannedExpression {
+                                return_type: Column {
+                                    name: "<val>",
+                                    sql_type: Integer,
+                                    value_offset: 0,
+                                    size: Inline(
+                                        4,
+                                    ),
+                                },
+                                kind: ConstantValue(
+                                    ConstantValueExpression {
+                                        value: Integer(
+                                            1,
+                                        ),
+                                    },
+                                ),
+                            },
+                        ],
+                        child: PlanNode {
+                            output_schema: Schema {
+                                inlined_storage_size: 9,
+                                columns: [
+                                    Column {
+                                        name: "users.id",
+                                        sql_type: Integer,
+                                        value_offset: 1,
+                                        size: Inline(
+                                            4,
+                                        ),
+                                    },
+                                    Column {
+                                        name: "users.name",
+                                        sql_type: Varchar,
+                                        value_offset: 5,
+                                        size: Variable(
+                                            32,
+                                        ),
+                                    },
+                                ],
+                                uninlined_columns: [
+                                    1,
+                                ],
+                            },
+                            kind: SeqScan(
+                                SeqScanPlan {
+                                    table_name: "users",
+                                    table_oid: 0,
+                                },
+                            ),
+                        },
+                    },
+                ),
+            }"#]]
+        .assert_eq(&format!("{plan:#?}"));
+    }
+}
