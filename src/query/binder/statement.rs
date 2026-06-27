@@ -34,7 +34,11 @@ pub struct BoundInsert {
 }
 
 #[derive(Debug)]
-pub struct BoundUpdate;
+pub struct BoundUpdate {
+    pub table: BoundBaseTableRef,
+    pub filter_expr: BoundExpression,
+    pub target_expr: Vec<(ColumnRef, BoundExpression)>,
+}
 
 #[derive(Debug)]
 pub struct BoundDelete;

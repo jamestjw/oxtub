@@ -3,7 +3,7 @@ use crate::{
     query::{
         binder::{
             expression::{BoundExpression, ColumnRef},
-            statement::{BoundInsert, BoundSelect, BoundStatement},
+            statement::{BoundDelete, BoundInsert, BoundSelect, BoundStatement, BoundUpdate},
             table_ref::{BoundExpressionListRef, TableRef},
         },
         planner::{
@@ -42,6 +42,16 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             BoundStatement::DropIndex(bound_drop_index) => todo!(),
         }
     }
+
+    fn plan_update(&self, bound_update: BoundUpdate) -> Result<PlanNode, PlannerError> {
+        // self.plan_table_ref(bound_update.)
+        todo!()
+    }
+
+    fn plan_delete(&self, bound_delete: BoundDelete) -> Result<PlanNode, PlannerError> {
+        todo!()
+    }
+
 
     fn plan_insert(&self, stmt: BoundInsert) -> Result<PlanNode, PlannerError> {
         let planned_expr_list = self.plan_bound_expression_list(stmt.bound_exprs)?;
