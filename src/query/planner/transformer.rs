@@ -69,7 +69,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                 return Err(PlannerError::InsertSchemaMismatch);
             }
             if target_col.sql_type().is_varlen()
-                && child_col.storage_size() > target_col.storage_size()
+                && child_col.declared_size() > target_col.declared_size()
             {
                 return Err(PlannerError::InsertSchemaMismatch);
             }
@@ -112,7 +112,8 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Make schema from first row since all rows should have the same schema
+        // TODO: validate every row has the same types before inferring the schema from the first row.
+        // Make schema from first row since all rows should have the same schema.
         let columns = planned_rows[0]
             .iter()
             .enumerate()
@@ -264,7 +265,9 @@ mod tests {
     use crate::{
         buffer::bpm::BufferPoolManager,
         catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
-        query::{binder::transformer::Binder, parser::parse_sql},
+        query::{
+            binder::statement::BoundStatement, binder::transformer::Binder, parser::parse_sql,
+        },
         storage::disk::disk_manager::DiskManager,
     };
 
@@ -292,6 +295,18 @@ mod tests {
         let bound = binder.bind_statement(statement).unwrap();
 
         planner.plan_statement(bound).unwrap()
+    }
+
+    fn plan_insert_sql(catalog: &Catalog<'_>, sql: &str) -> Result<PlanNode, PlannerError> {
+        let binder = Binder::new(catalog);
+        let planner = Planner::new(catalog);
+        let statement = parse_sql(sql).unwrap();
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Insert(insert) = bound else {
+            panic!("expected insert statement");
+        };
+
+        planner.plan_insert(insert)
     }
 
     #[test]
@@ -415,5 +430,182 @@ mod tests {
                 ),
             }"#]]
         .assert_eq(&format!("{plan:#?}"));
+    }
+
+    #[test]
+    fn plans_insert_values() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        let plan = plan_sql(
+            &catalog,
+            "insert into users (id, name) values (1, 'alice'), (2, 'bob')",
+        );
+
+        expect![[r#"
+            PlanNode {
+                output_schema: Schema {
+                    inlined_storage_size: 5,
+                    columns: [
+                        Column {
+                            name: "__oxtub_internal.insert_rows",
+                            sql_type: Integer,
+                            value_offset: 1,
+                            size: Inline(
+                                4,
+                            ),
+                        },
+                    ],
+                    uninlined_columns: [],
+                },
+                kind: Insert(
+                    InsertPlan {
+                        table_name: "users",
+                        table_oid: 0,
+                        table_schema: Schema {
+                            inlined_storage_size: 9,
+                            columns: [
+                                Column {
+                                    name: "id",
+                                    sql_type: Integer,
+                                    value_offset: 1,
+                                    size: Inline(
+                                        4,
+                                    ),
+                                },
+                                Column {
+                                    name: "name",
+                                    sql_type: Varchar,
+                                    value_offset: 5,
+                                    size: Variable(
+                                        32,
+                                    ),
+                                },
+                            ],
+                            uninlined_columns: [
+                                1,
+                            ],
+                        },
+                        columns: [
+                            TableQualified {
+                                table: "users",
+                                column: "id",
+                            },
+                            TableQualified {
+                                table: "users",
+                                column: "name",
+                            },
+                        ],
+                        child: PlanNode {
+                            output_schema: Schema {
+                                inlined_storage_size: 9,
+                                columns: [
+                                    Column {
+                                        name: "<unnamed>.0",
+                                        sql_type: Integer,
+                                        value_offset: 1,
+                                        size: Inline(
+                                            4,
+                                        ),
+                                    },
+                                    Column {
+                                        name: "<unnamed>.1",
+                                        sql_type: Varchar,
+                                        value_offset: 5,
+                                        size: Variable(
+                                            5,
+                                        ),
+                                    },
+                                ],
+                                uninlined_columns: [
+                                    1,
+                                ],
+                            },
+                            kind: Values(
+                                ValuesPlan {
+                                    rows: [
+                                        [
+                                            PlannedExpression {
+                                                return_type: ExpressionType {
+                                                    sql_type: Integer,
+                                                    varchar_size: None,
+                                                },
+                                                kind: ConstantValue(
+                                                    ConstantValueExpression {
+                                                        value: Integer(
+                                                            1,
+                                                        ),
+                                                    },
+                                                ),
+                                            },
+                                            PlannedExpression {
+                                                return_type: ExpressionType {
+                                                    sql_type: Varchar,
+                                                    varchar_size: Some(
+                                                        5,
+                                                    ),
+                                                },
+                                                kind: ConstantValue(
+                                                    ConstantValueExpression {
+                                                        value: Varchar(
+                                                            "alice",
+                                                        ),
+                                                    },
+                                                ),
+                                            },
+                                        ],
+                                        [
+                                            PlannedExpression {
+                                                return_type: ExpressionType {
+                                                    sql_type: Integer,
+                                                    varchar_size: None,
+                                                },
+                                                kind: ConstantValue(
+                                                    ConstantValueExpression {
+                                                        value: Integer(
+                                                            2,
+                                                        ),
+                                                    },
+                                                ),
+                                            },
+                                            PlannedExpression {
+                                                return_type: ExpressionType {
+                                                    sql_type: Varchar,
+                                                    varchar_size: Some(
+                                                        3,
+                                                    ),
+                                                },
+                                                kind: ConstantValue(
+                                                    ConstantValueExpression {
+                                                        value: Varchar(
+                                                            "bob",
+                                                        ),
+                                                    },
+                                                ),
+                                            },
+                                        ],
+                                    ],
+                                },
+                            ),
+                        },
+                    },
+                ),
+            }"#]]
+        .assert_eq(&format!("{plan:#?}"));
+    }
+
+    #[test]
+    #[ignore = "TODO: validate every row in VALUES planning"]
+    fn rejects_multi_row_insert_when_later_row_type_differs_from_first_row() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        // TODO: fix VALUES planning to validate every row, not just infer schema from the first row.
+        let err = plan_insert_sql(&catalog, "insert into users (id) values (1), ('bad')")
+            .expect_err("expected insert schema mismatch");
+
+        assert!(matches!(err, PlannerError::InsertSchemaMismatch));
     }
 }

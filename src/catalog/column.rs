@@ -59,7 +59,7 @@ impl Column {
         }
     }
 
-    pub fn storage_size(&self) -> usize {
+    pub fn declared_size(&self) -> usize {
         match self.size {
             ColumnSize::Inline(s) => s,
             ColumnSize::Variable(s) => s,

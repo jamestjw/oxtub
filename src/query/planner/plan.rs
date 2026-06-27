@@ -16,7 +16,6 @@ impl PlanNode {
     pub fn output_schema(&self) -> &Schema {
         &self.output_schema
     }
-
 }
 
 #[derive(Debug)]

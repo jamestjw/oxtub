@@ -15,7 +15,7 @@ impl ExpressionType {
         Self {
             sql_type: column.sql_type(),
             varchar_size: if column.sql_type() == SqlType::Varchar {
-                Some(column.storage_size())
+                Some(column.declared_size())
             } else {
                 None
             },
