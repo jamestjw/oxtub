@@ -15,6 +15,11 @@ impl SqlType {
         !matches!(self, Self::Varchar)
     }
 
+    pub fn is_varlen(self) -> bool {
+        // TODO: remember to update this when we have new varlen types
+        matches!(self, Self::Varchar)
+    }
+
     // The size occupied in the inlined part of the tuple
     pub fn inline_size(self) -> usize {
         match self {

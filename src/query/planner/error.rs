@@ -12,4 +12,7 @@ pub enum PlannerError {
 
     #[error("more than one column with name: {0}")]
     AmbiguousColumn(String),
+
+    #[error("insert schema mismatch")]
+    InsertSchemaMismatch,
 }

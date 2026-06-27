@@ -1,9 +1,9 @@
 use crate::{
-    catalog::{manager::Catalog, schema::Schema},
+    catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
     query::{
         binder::{
-            expression::BoundExpression,
-            statement::{BoundSelect, BoundStatement},
+            expression::{BoundExpression, ColumnRef},
+            statement::{BoundInsert, BoundSelect, BoundStatement},
             table_ref::{BoundExpressionListRef, TableRef},
         },
         planner::{
@@ -12,7 +12,10 @@ use crate::{
                 ColumnValueExpression, ConstantValueExpression, ExpressionType, PlannedExpression,
                 PlannedExpressionKind,
             },
-            plan::{FilterPlan, PlanNode, PlanNodeKind, ProjectionPlan, SeqScanPlan, ValuesPlan},
+            plan::{
+                FilterPlan, InsertPlan, PlanNode, PlanNodeKind, ProjectionPlan, SeqScanPlan,
+                ValuesPlan,
+            },
         },
     },
 };
@@ -29,7 +32,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
     pub fn plan_statement(&self, stmt: BoundStatement) -> Result<PlanNode, PlannerError> {
         match stmt {
             BoundStatement::Select(bound_select) => self.plan_select(bound_select),
-            BoundStatement::Insert(bound_insert) => todo!(),
+            BoundStatement::Insert(bound_insert) => self.plan_insert(bound_insert),
             BoundStatement::Update(bound_update) => todo!(),
             BoundStatement::Delete(bound_delete) => todo!(),
             BoundStatement::Explain(bound_explain) => todo!(),
@@ -38,6 +41,56 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             BoundStatement::DropTable(bound_drop_table) => todo!(),
             BoundStatement::DropIndex(bound_drop_index) => todo!(),
         }
+    }
+
+    fn plan_insert(&self, stmt: BoundInsert) -> Result<PlanNode, PlannerError> {
+        let planned_expr_list = self.plan_bound_expression_list(stmt.bound_exprs)?;
+        let insert_columns = stmt.columns;
+        let table_schema = stmt.table.schema();
+        let child_schema = planned_expr_list.output_schema();
+
+        if insert_columns.len() != child_schema.columns().len() {
+            return Err(PlannerError::InsertSchemaMismatch);
+        }
+
+        for (insert_col, child_col) in insert_columns.iter().zip(child_schema.columns()) {
+            let insert_col_name = match insert_col {
+                ColumnRef::Unqualified { column } => column,
+                ColumnRef::TableQualified { column, .. } => column,
+            };
+
+            let target_col = table_schema
+                .columns()
+                .iter()
+                .find(|col| col.name() == insert_col_name)
+                .expect("binder should have resolved insert columns");
+
+            if target_col.sql_type() != child_col.sql_type() {
+                return Err(PlannerError::InsertSchemaMismatch);
+            }
+            if target_col.sql_type().is_varlen()
+                && child_col.storage_size() > target_col.storage_size()
+            {
+                return Err(PlannerError::InsertSchemaMismatch);
+            }
+        }
+
+        // Output of the insert statement is the number of rows inserted
+        let output_col = Column::new_static(
+            String::from("__oxtub_internal.insert_rows"),
+            SqlType::Integer,
+        );
+
+        Ok(PlanNode {
+            output_schema: Schema::new(&[output_col]),
+            kind: PlanNodeKind::Insert(InsertPlan {
+                table_name: stmt.table.tbl_name().to_string(),
+                table_oid: stmt.table.tbl_oid(),
+                table_schema: stmt.table.schema().clone(),
+                columns: insert_columns,
+                child: Box::new(planned_expr_list),
+            }),
+        })
     }
 
     fn plan_bound_expression_list(
@@ -158,39 +211,47 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                     kind: PlannedExpressionKind::ConstantValue(ConstantValueExpression { value }),
                 },
             )),
-            BoundExpression::Column(column_ref) => match children[..] {
-                [child] => {
-                    let col_name = column_ref.to_str();
-                    let child_schema = child.output_schema();
-                    let matched_columns = child_schema
-                        .columns()
-                        .iter()
-                        .enumerate()
-                        // Binder normalizes column refs to schema casing and scan schemas
-                        // use the same qualified names.
-                        .filter(|(_, col)| col.name() == col_name)
-                        .collect::<Vec<_>>();
-
-                    match matched_columns[..] {
-                        [] => panic!("should not be possible as binder would have caught this?"),
-                        [(idx, col)] => Ok((
-                            Some(col_name),
-                            PlannedExpression {
-                                return_type: ExpressionType::from_column(col),
-                                kind: PlannedExpressionKind::ColumnValue(ColumnValueExpression {
-                                    tuple_idx: 0,
-                                    col_idx: idx,
-                                }),
-                            },
-                        )),
-                        _ => Err(PlannerError::AmbiguousColumn(col_name)),
-                    }
-                }
-                [_left, _right] => todo!("binder doesnt support joins yet!"),
-                _ => panic!("cannot occur"),
-            },
+            BoundExpression::Column(column_ref) => self.plan_column_ref(column_ref, children),
             BoundExpression::BinaryOp { left, op, right } => todo!(),
             BoundExpression::UnaryOp { expr, op } => todo!(),
+        }
+    }
+
+    fn plan_column_ref(
+        &self,
+        column_ref: ColumnRef,
+        children: Vec<&PlanNode>,
+    ) -> Result<(Option<String>, PlannedExpression), PlannerError> {
+        match children[..] {
+            [child] => {
+                let col_name = column_ref.to_str();
+                let child_schema = child.output_schema();
+                let matched_columns = child_schema
+                    .columns()
+                    .iter()
+                    .enumerate()
+                    // Binder normalizes column refs to schema casing and scan schemas
+                    // use the same qualified names.
+                    .filter(|(_, col)| col.name() == col_name)
+                    .collect::<Vec<_>>();
+
+                match matched_columns[..] {
+                    [] => panic!("should not be possible as binder would have caught this?"),
+                    [(idx, col)] => Ok((
+                        Some(col_name),
+                        PlannedExpression {
+                            return_type: ExpressionType::from_column(col),
+                            kind: PlannedExpressionKind::ColumnValue(ColumnValueExpression {
+                                tuple_idx: 0,
+                                col_idx: idx,
+                            }),
+                        },
+                    )),
+                    _ => Err(PlannerError::AmbiguousColumn(col_name)),
+                }
+            }
+            [_left, _right] => todo!("binder doesnt support joins yet!"),
+            _ => panic!("cannot occur"),
         }
     }
 }

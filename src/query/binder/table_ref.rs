@@ -40,6 +40,10 @@ impl BoundBaseTableRef {
         &self.table_name
     }
 
+    pub fn tbl_oid(&self) -> TableId {
+        self.table_oid
+    }
+
     pub fn bound_tbl_name(&self) -> &str {
         self.alias.as_ref().unwrap_or(&self.table_name)
     }
@@ -52,7 +56,7 @@ impl BoundBaseTableRef {
 #[derive(Debug)]
 pub struct BoundExpressionListRef {
     // A unique identifier for this values list
-    pub(crate)identifier: String,
+    pub(crate) identifier: String,
     pub(crate) values: Vec<Vec<BoundExpression>>,
 }
 
