@@ -1,10 +1,10 @@
 use crate::{
-    catalog::manager::Catalog,
+    catalog::{manager::Catalog, schema::Schema},
     query::{
         binder::{
             expression::BoundExpression,
             statement::{BoundSelect, BoundStatement},
-            table_ref::TableRef,
+            table_ref::{BoundExpressionListRef, TableRef},
         },
         planner::{
             error::PlannerError,
@@ -12,7 +12,7 @@ use crate::{
                 ColumnValueExpression, ConstantValueExpression, ExpressionType, PlannedExpression,
                 PlannedExpressionKind,
             },
-            plan::{FilterPlan, PlanNode, PlanNodeKind, ProjectionPlan, SeqScanPlan},
+            plan::{FilterPlan, PlanNode, PlanNodeKind, ProjectionPlan, SeqScanPlan, ValuesPlan},
         },
     },
 };
@@ -38,6 +38,41 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             BoundStatement::DropTable(bound_drop_table) => todo!(),
             BoundStatement::DropIndex(bound_drop_index) => todo!(),
         }
+    }
+
+    fn plan_bound_expression_list(
+        &self,
+        expr_list: BoundExpressionListRef,
+    ) -> Result<PlanNode, PlannerError> {
+        assert!(expr_list.values.len() > 0);
+
+        let planned_rows: Vec<Vec<PlannedExpression>> = expr_list
+            .values
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|expr| {
+                        let (_, expr) = self.plan_expression(expr, vec![])?;
+                        Ok(expr)
+                    })
+                    .collect::<Result<Vec<_>, PlannerError>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Make schema from first row since all rows should have the same schema
+        let columns = planned_rows[0]
+            .iter()
+            .enumerate()
+            .map(|(i, col)| {
+                col.return_type
+                    .to_column(format!("{id}.{i}", id = expr_list.identifier))
+            })
+            .collect::<Vec<_>>();
+
+        Ok(PlanNode {
+            output_schema: Schema::new(&columns),
+            kind: PlanNodeKind::Values(ValuesPlan { rows: planned_rows }),
+        })
     }
 
     fn plan_select(&self, stmt: BoundSelect) -> Result<PlanNode, PlannerError> {

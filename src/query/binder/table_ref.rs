@@ -52,8 +52,8 @@ impl BoundBaseTableRef {
 #[derive(Debug)]
 pub struct BoundExpressionListRef {
     // A unique identifier for this values list
-    identifier: String,
-    values: Vec<Vec<BoundExpression>>,
+    pub(crate)identifier: String,
+    pub(crate) values: Vec<Vec<BoundExpression>>,
 }
 
 impl BoundExpressionListRef {
