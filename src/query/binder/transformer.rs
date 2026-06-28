@@ -6,13 +6,16 @@ use crate::{
         binder::{
             error::BinderError,
             expression::{BoundExpression, ColumnRef, are_column_refs_unique},
-            statement::{BoundCreateTable, BoundInsert, BoundSelect, BoundStatement},
+            statement::{
+                BoundCreateTable, BoundDelete, BoundInsert, BoundSelect, BoundStatement,
+                BoundUpdate,
+            },
             table_ref::{BoundBaseTableRef, BoundExpressionListRef, TableRef},
         },
         expression::Expression,
         statement::{
-            CreateColumn, CreateTableStatement, InsertStatement, SelectItem, SelectStatement,
-            Statement,
+            CreateColumn, CreateTableStatement, DeleteStatement, InsertStatement, SelectItem,
+            SelectStatement, Statement, UpdateStatement,
         },
     },
 };
@@ -22,7 +25,12 @@ pub struct Binder<'catalog, 'bpm> {
 }
 
 struct BindContext<'a> {
-    scope: Option<&'a TableRef>,
+    scope: Option<BindScope<'a>>,
+}
+
+enum BindScope<'a> {
+    BaseTable(&'a BoundBaseTableRef),
+    ExprList(&'a BoundExpressionListRef),
 }
 
 impl<'a> BindContext<'a> {
@@ -30,8 +38,19 @@ impl<'a> BindContext<'a> {
         Self { scope: None }
     }
 
-    fn table_scope(table: &'a TableRef) -> Self {
-        Self { scope: Some(table) }
+    fn base_table_scope(table: &'a BoundBaseTableRef) -> Self {
+        Self {
+            scope: Some(BindScope::BaseTable(table)),
+        }
+    }
+
+    fn table_ref_scope(table: &'a TableRef) -> Self {
+        match table {
+            TableRef::BaseTable(table) => Self::base_table_scope(table),
+            TableRef::ExprList(expr_list) => Self {
+                scope: Some(BindScope::ExprList(expr_list)),
+            },
+        }
     }
 }
 
@@ -47,24 +66,59 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
                 Ok(BoundStatement::Select(select))
             }
             Statement::Insert(insert_statement) => self.bind_insert(insert_statement),
-            Statement::Update(_update_statement) => todo!(),
-            Statement::Delete(_delete_statement) => todo!(),
+            Statement::Update(update_statement) => self.bind_update(update_statement),
+            Statement::Delete(delete_statement) => self.bind_delete(delete_statement),
             Statement::CreateTable(create_table_statement) => {
                 self.bind_create_tbl(create_table_statement)
             }
         }
     }
 
+    fn bind_update(&self, stmt: UpdateStatement) -> Result<BoundStatement, BinderError> {
+        let table = self.bind_base_table_ref(stmt.table_name, None)?;
+        let context = BindContext::base_table_scope(&table);
+        let mut target_expr = vec![];
+
+        for (col_name, expr) in stmt.assignments {
+            let col_ref = Self::resolve_column_ref_from_base_table_ref(&table, col_name)?;
+            let bound_expr = self.bind_expression(expr, &context)?;
+
+            target_expr.push((col_ref, bound_expr));
+        }
+
+        let filter_expr = stmt
+            .where_clause
+            .map(|expr| self.bind_expression(expr, &context))
+            .transpose()?;
+
+        Ok(BoundStatement::Update(BoundUpdate {
+            table,
+            filter_expr,
+            target_expr,
+        }))
+    }
+
+    fn bind_delete(&self, stmt: DeleteStatement) -> Result<BoundStatement, BinderError> {
+        let table = self.bind_base_table_ref(stmt.table_name, None)?;
+        let context = BindContext::base_table_scope(&table);
+        let filter_expr = stmt
+            .where_clause
+            .map(|expr| self.bind_expression(expr, &context))
+            .transpose()?;
+
+        Ok(BoundStatement::Delete(BoundDelete { table, filter_expr }))
+    }
+
     fn bind_select(&self, stmt: SelectStatement) -> Result<BoundSelect, BinderError> {
         // TODO: should support aliases!
         // TODO: can also select without a From clause
         let tbl_ref = TableRef::BaseTable(self.bind_base_table_ref(stmt.table_name, None)?);
-        let context = BindContext::table_scope(&tbl_ref);
+        let context = BindContext::table_ref_scope(&tbl_ref);
         let projection = self.bind_select_list(stmt.projection, &context)?;
-        let where_ = match stmt.where_clause {
-            None => None,
-            Some(expr) => Some(self.bind_expression(expr, &context)?),
-        };
+        let where_ = stmt
+            .where_clause
+            .map(|expr| self.bind_expression(expr, &context))
+            .transpose()?;
 
         Ok(BoundSelect {
             table: tbl_ref,
@@ -103,7 +157,7 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
             None => Err(BinderError::UnsupportedExpression(
                 "select * without table scope".into(),
             )),
-            Some(TableRef::BaseTable(bound_base_table_ref)) => {
+            Some(BindScope::BaseTable(bound_base_table_ref)) => {
                 let tbl_name = bound_base_table_ref.bound_tbl_name();
                 let cols = bound_base_table_ref.schema().columns();
                 let mut res = Vec::with_capacity(cols.len());
@@ -116,7 +170,7 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
 
                 Ok(res)
             }
-            Some(TableRef::ExprList(_)) => panic!("select * should not use this table ref"),
+            Some(BindScope::ExprList(_)) => panic!("select * should not use this table ref"),
         }
     }
 
@@ -252,10 +306,10 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
         context: &BindContext<'_>,
     ) -> Result<ColumnRef, BinderError> {
         match context.scope {
-            Some(TableRef::BaseTable(table)) => {
+            Some(BindScope::BaseTable(table)) => {
                 Self::resolve_column_ref_from_base_table_ref(table, column)
             }
-            Some(TableRef::ExprList(_)) => Err(BinderError::UnsupportedExpression(format!(
+            Some(BindScope::ExprList(_)) => Err(BinderError::UnsupportedExpression(format!(
                 "column reference `{column}` in expression list scope"
             ))),
             None => Err(BinderError::UnsupportedExpression(format!(
@@ -662,12 +716,222 @@ mod tests {
     }
 
     #[test]
+    fn binds_update_with_assignments_and_where_clause() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("update users set name = 'bob' where id = 1").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Update(update) = bound else {
+            panic!("expected update statement");
+        };
+
+        expect![[r#"
+            BoundUpdate {
+                table: BoundBaseTableRef {
+                    table_name: "users",
+                    table_oid: 0,
+                    alias: None,
+                    schema: Schema {
+                        inlined_storage_size: 9,
+                        columns: [
+                            Column {
+                                name: "id",
+                                sql_type: Integer,
+                                value_offset: 1,
+                                size: Inline(
+                                    4,
+                                ),
+                            },
+                            Column {
+                                name: "name",
+                                sql_type: Varchar,
+                                value_offset: 5,
+                                size: Variable(
+                                    32,
+                                ),
+                            },
+                        ],
+                        uninlined_columns: [
+                            1,
+                        ],
+                    },
+                },
+                filter_expr: Some(
+                    BinaryOp {
+                        left: Column(
+                            TableQualified {
+                                table: "users",
+                                column: "id",
+                            },
+                        ),
+                        op: Eq,
+                        right: Literal(
+                            Integer(
+                                1,
+                            ),
+                        ),
+                    },
+                ),
+                target_expr: [
+                    (
+                        TableQualified {
+                            table: "users",
+                            column: "name",
+                        },
+                        Literal(
+                            Varchar(
+                                "bob",
+                            ),
+                        ),
+                    ),
+                ],
+            }"#]]
+        .assert_eq(&format!("{update:#?}"));
+    }
+
+    #[test]
+    fn binds_update_without_where_clause() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("update users set name = 'bob'").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Update(update) = bound else {
+            panic!("expected update statement");
+        };
+
+        assert!(update.filter_expr.is_none());
+        assert_eq!(update.target_expr.len(), 1);
+    }
+
+    #[test]
+    fn binds_delete_with_where_clause() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("delete from users where id = 1").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Delete(delete) = bound else {
+            panic!("expected delete statement");
+        };
+
+        expect![[r#"
+            BoundDelete {
+                table: BoundBaseTableRef {
+                    table_name: "users",
+                    table_oid: 0,
+                    alias: None,
+                    schema: Schema {
+                        inlined_storage_size: 9,
+                        columns: [
+                            Column {
+                                name: "id",
+                                sql_type: Integer,
+                                value_offset: 1,
+                                size: Inline(
+                                    4,
+                                ),
+                            },
+                            Column {
+                                name: "name",
+                                sql_type: Varchar,
+                                value_offset: 5,
+                                size: Variable(
+                                    32,
+                                ),
+                            },
+                        ],
+                        uninlined_columns: [
+                            1,
+                        ],
+                    },
+                },
+                filter_expr: Some(
+                    BinaryOp {
+                        left: Column(
+                            TableQualified {
+                                table: "users",
+                                column: "id",
+                            },
+                        ),
+                        op: Eq,
+                        right: Literal(
+                            Integer(
+                                1,
+                            ),
+                        ),
+                    },
+                ),
+            }"#]]
+        .assert_eq(&format!("{delete:#?}"));
+    }
+
+    #[test]
+    fn binds_delete_without_where_clause() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("delete from users").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Delete(delete) = bound else {
+            panic!("expected delete statement");
+        };
+
+        assert!(delete.filter_expr.is_none());
+    }
+
+    #[test]
     fn rejects_select_unknown_column() {
         let bpm = setup_bpm(3);
         let mut catalog = Catalog::new(&bpm);
         create_users_table(&mut catalog);
         let binder = Binder::new(&catalog);
         let statement = parse_sql("select missing from users").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::ColumnNotFound(column) if column == "missing"));
+    }
+
+    #[test]
+    fn rejects_update_unknown_target_column() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("update users set missing = 1").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::ColumnNotFound(column) if column == "missing"));
+    }
+
+    #[test]
+    fn rejects_update_unknown_filter_column() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("update users set name = 'bob' where missing = 1").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::ColumnNotFound(column) if column == "missing"));
+    }
+
+    #[test]
+    fn rejects_delete_unknown_filter_column() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("delete from users where missing = 1").unwrap();
         let err = unwrap_binder_err(binder.bind_statement(statement));
 
         assert!(matches!(err, BinderError::ColumnNotFound(column) if column == "missing"));
