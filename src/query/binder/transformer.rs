@@ -47,6 +47,8 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
                 Ok(BoundStatement::Select(select))
             }
             Statement::Insert(insert_statement) => self.bind_insert(insert_statement),
+            Statement::Update(_update_statement) => todo!(),
+            Statement::Delete(_delete_statement) => todo!(),
             Statement::CreateTable(create_table_statement) => {
                 self.bind_create_tbl(create_table_statement)
             }

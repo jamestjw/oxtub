@@ -1,9 +1,10 @@
 use sqlparser::{
     ast::{
-        BinaryOperator as SqlBinaryOperator, CharacterLength, ColumnOption, DataType,
-        Expr as SqlExpr, Ident, IndexColumn, ObjectName, Query, Select,
+        AssignmentTarget, BinaryOperator as SqlBinaryOperator, CharacterLength, ColumnOption,
+        DataType, Expr as SqlExpr, FromTable, Ident, IndexColumn, ObjectName, Query, Select,
         SelectItem as SqlSelectItem, SetExpr, Statement as SqlStatement, TableConstraint,
-        TableFactor, TableObject, UnaryOperator as SqlUnaryOperator, Value as SqlValue,
+        TableFactor, TableObject, TableWithJoins, UnaryOperator as SqlUnaryOperator,
+        Value as SqlValue,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -15,8 +16,8 @@ use crate::{
         error::QueryError,
         expression::{BinaryOperator, Expression, UnaryOperator},
         statement::{
-            CreateColumn, CreateTableStatement, InsertStatement, SelectItem, SelectStatement,
-            Statement,
+            CreateColumn, CreateTableStatement, DeleteStatement, InsertStatement, SelectItem,
+            SelectStatement, Statement, UpdateStatement,
         },
     },
     types::value::Value,
@@ -35,9 +36,11 @@ fn convert_statement(statement: SqlStatement) -> Result<Statement, QueryError> {
     match statement {
         SqlStatement::Query(query) => convert_query(*query),
         SqlStatement::Insert(insert) => convert_insert(insert),
+        SqlStatement::Update(update) => convert_update(update),
+        SqlStatement::Delete(delete) => convert_delete(delete),
         SqlStatement::CreateTable(create) => convert_create_table(create),
         _ => Err(QueryError::UnsupportedStatement(
-            "only SELECT, INSERT, and CREATE TABLE are supported",
+            "only SELECT, INSERT, UPDATE, DELETE, and CREATE TABLE are supported",
         )),
     }
 }
@@ -116,6 +119,87 @@ fn convert_insert(insert: sqlparser::ast::Insert) -> Result<Statement, QueryErro
         table_name: object_name_to_string(table_name),
         columns: non_empty_object_names(insert.columns),
         values: rows,
+    }))
+}
+
+fn convert_update(update: sqlparser::ast::Update) -> Result<Statement, QueryError> {
+    if !update.optimizer_hints.is_empty() {
+        return Err(QueryError::UnsupportedStatement(
+            "UPDATE optimizer hints are not supported",
+        ));
+    }
+    if update.from.is_some()
+        || update.returning.is_some()
+        || update.output.is_some()
+        || update.or.is_some()
+        || !update.order_by.is_empty()
+        || update.limit.is_some()
+    {
+        return Err(QueryError::UnsupportedStatement(
+            "only simple UPDATE statements are supported",
+        ));
+    }
+
+    let table_name = table_name_from_single_table_with_joins(&update.table)?;
+    let assignments = update
+        .assignments
+        .into_iter()
+        .map(|assignment| match assignment.target {
+            AssignmentTarget::ColumnName(column_name) => {
+                let column_name = simple_object_name_to_string(&column_name).ok_or(
+                    QueryError::UnsupportedStatement("qualified UPDATE targets are not supported"),
+                )?;
+
+                Ok((column_name, convert_expr(assignment.value)?))
+            }
+            _ => Err(QueryError::UnsupportedStatement(
+                "UPDATE tuple assignments are not supported",
+            )),
+        })
+        .collect::<Result<Vec<_>, QueryError>>()?;
+
+    Ok(Statement::Update(UpdateStatement {
+        table_name,
+        assignments,
+        where_clause: update.selection.map(convert_expr).transpose()?,
+    }))
+}
+
+fn convert_delete(delete: sqlparser::ast::Delete) -> Result<Statement, QueryError> {
+    if !delete.optimizer_hints.is_empty() {
+        return Err(QueryError::UnsupportedStatement(
+            "DELETE optimizer hints are not supported",
+        ));
+    }
+    if !delete.tables.is_empty()
+        || delete.using.is_some()
+        || delete.returning.is_some()
+        || delete.output.is_some()
+        || !delete.order_by.is_empty()
+        || delete.limit.is_some()
+    {
+        return Err(QueryError::UnsupportedStatement(
+            "only simple DELETE statements are supported",
+        ));
+    }
+
+    let tables = match &delete.from {
+        FromTable::WithFromKeyword(tables) => tables,
+        FromTable::WithoutKeyword(_) => {
+            return Err(QueryError::UnsupportedStatement(
+                "DELETE must use a FROM clause",
+            ));
+        }
+    };
+    let [table] = tables.as_slice() else {
+        return Err(QueryError::UnsupportedStatement(
+            "DELETE must target exactly one table",
+        ));
+    };
+
+    Ok(Statement::Delete(DeleteStatement {
+        table_name: table_name_from_single_table_with_joins(table)?,
+        where_clause: delete.selection.map(convert_expr).transpose()?,
     }))
 }
 
@@ -299,6 +383,30 @@ fn ident_to_string(ident: &Ident) -> String {
 
 fn object_name_to_string(name: &ObjectName) -> String {
     name.to_string()
+}
+
+fn simple_object_name_to_string(name: &ObjectName) -> Option<String> {
+    let [part] = name.0.as_slice() else {
+        return None;
+    };
+
+    part.as_ident().map(ident_to_string)
+}
+
+fn table_name_from_single_table_with_joins(table: &TableWithJoins) -> Result<String, QueryError> {
+    if !table.joins.is_empty() {
+        return Err(QueryError::UnsupportedStatement(
+            "joins are not supported yet",
+        ));
+    }
+
+    let TableFactor::Table { name, .. } = &table.relation else {
+        return Err(QueryError::UnsupportedStatement(
+            "statement target must be a base table",
+        ));
+    };
+
+    Ok(object_name_to_string(name))
 }
 
 #[cfg(test)]
@@ -532,6 +640,84 @@ mod tests {
                 },
             )"#]]
         .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn parses_update_statement() {
+        let statement =
+            parse_sql("update users set name = 'bob', active = true where id = 1").unwrap();
+
+        expect![[r#"
+            Update(
+                UpdateStatement {
+                    table_name: "users",
+                    assignments: [
+                        (
+                            "name",
+                            Literal(
+                                Varchar(
+                                    "bob",
+                                ),
+                            ),
+                        ),
+                        (
+                            "active",
+                            Literal(
+                                Boolean(
+                                    true,
+                                ),
+                            ),
+                        ),
+                    ],
+                    where_clause: Some(
+                        BinaryOp {
+                            left: Column(
+                                "id",
+                            ),
+                            op: Eq,
+                            right: Literal(
+                                Integer(
+                                    1,
+                                ),
+                            ),
+                        },
+                    ),
+                },
+            )"#]]
+        .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn parses_delete_statement() {
+        let statement = parse_sql("delete from users where id = 1").unwrap();
+
+        expect![[r#"
+            Delete(
+                DeleteStatement {
+                    table_name: "users",
+                    where_clause: Some(
+                        BinaryOp {
+                            left: Column(
+                                "id",
+                            ),
+                            op: Eq,
+                            right: Literal(
+                                Integer(
+                                    1,
+                                ),
+                            ),
+                        },
+                    ),
+                },
+            )"#]]
+        .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn rejects_qualified_update_targets() {
+        let err = parse_sql("update users set users.name = 'bob'").unwrap_err();
+
+        assert!(matches!(err, QueryError::UnsupportedStatement(_)));
     }
 
     #[test]

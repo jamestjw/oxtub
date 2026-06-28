@@ -4,6 +4,8 @@ use crate::{catalog::types::SqlType, query::expression::Expression};
 pub enum Statement {
     Select(SelectStatement),
     Insert(InsertStatement),
+    Update(UpdateStatement),
+    Delete(DeleteStatement),
     CreateTable(CreateTableStatement),
 }
 
@@ -25,6 +27,19 @@ pub struct InsertStatement {
     pub table_name: String,
     pub columns: Option<Vec<String>>,
     pub values: Vec<Vec<Expression>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateStatement {
+    pub table_name: String,
+    pub assignments: Vec<(String, Expression)>,
+    pub where_clause: Option<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteStatement {
+    pub table_name: String,
+    pub where_clause: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
