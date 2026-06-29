@@ -77,13 +77,13 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     fn bind_update(&self, stmt: UpdateStatement) -> Result<BoundStatement, BinderError> {
         let table = self.bind_base_table_ref(stmt.table_name, None)?;
         let context = BindContext::base_table_scope(&table);
-        let mut target_expr = vec![];
+        let mut target_exprs = vec![];
 
         for (col_name, expr) in stmt.assignments {
             let col_ref = Self::resolve_column_ref_from_base_table_ref(&table, col_name)?;
             let bound_expr = self.bind_expression(expr, &context)?;
 
-            target_expr.push((col_ref, bound_expr));
+            target_exprs.push((col_ref, bound_expr));
         }
 
         let filter_expr = stmt
@@ -94,7 +94,7 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
         Ok(BoundStatement::Update(BoundUpdate {
             table,
             filter_expr,
-            target_expr,
+            target_exprs,
         }))
     }
 
@@ -775,7 +775,7 @@ mod tests {
                         ),
                     },
                 ),
-                target_expr: [
+                target_exprs: [
                     (
                         TableQualified {
                             table: "users",
@@ -806,7 +806,7 @@ mod tests {
         };
 
         assert!(update.filter_expr.is_none());
-        assert_eq!(update.target_expr.len(), 1);
+        assert_eq!(update.target_exprs.len(), 1);
     }
 
     #[test]

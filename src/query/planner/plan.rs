@@ -26,6 +26,7 @@ pub enum PlanNodeKind {
     Values(ValuesPlan),
     Insert(InsertPlan),
     CreateTable(CreateTablePlan),
+    Update(UpdatePlan),
 }
 
 #[derive(Debug)]
@@ -108,4 +109,13 @@ pub struct CreateTablePlan {
     pub name: String,
     pub columns: Vec<Column>,
     pub primary_key_cols: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct UpdatePlan {
+    pub table_name: String,
+    pub table_oid: TableId,
+    pub table_schema: Schema,
+    pub expressions: Vec<PlannedExpression>,
+    pub child: Box<PlanNode>,
 }

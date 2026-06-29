@@ -15,4 +15,7 @@ pub enum PlannerError {
 
     #[error("insert schema mismatch")]
     InsertSchemaMismatch,
+
+    #[error("update schema mismatch")]
+    UpdateSchemaMismatch,
 }

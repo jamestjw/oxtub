@@ -14,7 +14,7 @@ use crate::{
             },
             plan::{
                 FilterPlan, InsertPlan, PlanNode, PlanNodeKind, ProjectionPlan, SeqScanPlan,
-                ValuesPlan,
+                UpdatePlan, ValuesPlan,
             },
         },
     },
@@ -33,8 +33,8 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         match stmt {
             BoundStatement::Select(bound_select) => self.plan_select(bound_select),
             BoundStatement::Insert(bound_insert) => self.plan_insert(bound_insert),
-            BoundStatement::Update(bound_update) => todo!(),
-            BoundStatement::Delete(bound_delete) => todo!(),
+            BoundStatement::Update(bound_update) => self.plan_update(bound_update),
+            BoundStatement::Delete(bound_delete) => self.plan_delete(bound_delete),
             BoundStatement::Explain(bound_explain) => todo!(),
             BoundStatement::CreateTable(bound_create_table) => todo!(),
             BoundStatement::CreateIndex(bound_create_index) => todo!(),
@@ -44,14 +44,82 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
     }
 
     fn plan_update(&self, bound_update: BoundUpdate) -> Result<PlanNode, PlannerError> {
-        // self.plan_table_ref(bound_update.)
-        todo!()
+        let table_name = bound_update.table.tbl_name().to_owned();
+        let table_oid = bound_update.table.tbl_oid();
+        let table_schema = bound_update.table.schema().clone();
+
+        let planned_table = self.plan_table_ref(TableRef::BaseTable(bound_update.table))?;
+        let condition = match bound_update.filter_expr {
+            Some(expr) => {
+                let (_, expr) = self.plan_expression(expr, &[&planned_table])?;
+                Some(expr)
+            }
+            None => None,
+        };
+
+        let filtered_node = match condition {
+            Some(expr) => PlanNode {
+                output_schema: planned_table.output_schema().clone(),
+                kind: PlanNodeKind::Filter(FilterPlan {
+                    predicate: expr,
+                    child: Box::new(planned_table),
+                }),
+            },
+            None => planned_table,
+        };
+
+        // We build target_exprs by just referencing the original columns,
+        // then we put in the new values for columns that have been modified
+        let mut target_exprs: Vec<PlannedExpression> = filtered_node
+            .output_schema()
+            .columns()
+            .iter()
+            .enumerate()
+            .map(|(idx, col)| PlannedExpression {
+                return_type: ExpressionType::from_column(col),
+                kind: PlannedExpressionKind::ColumnValue(ColumnValueExpression {
+                    tuple_idx: 0,
+                    col_idx: idx,
+                }),
+            })
+            .collect();
+
+        let scope = &[&filtered_node];
+        for (col, expr) in bound_update.target_exprs {
+            let (_, target_expr) = self.plan_expression(expr, scope)?;
+            let (_, col_expr, expr_type) = self.plan_column_ref(col, scope)?;
+
+            // TODO: we don't need pure equality, we could always save an INTEGER into
+            // a column with type BIGINT for instance. In reality, we don't want equality
+            // but some notion of compatibility.
+            if expr_type.sql_type != target_expr.return_type.sql_type {
+                return Err(PlannerError::UpdateSchemaMismatch);
+            }
+
+            target_exprs[col_expr.col_idx] = target_expr;
+        }
+
+        // Number of rows updated
+        let output_schema = Schema::new(&[Column::new_static(
+            "__oxtub_internal.update_rows".to_string(),
+            SqlType::Integer,
+        )]);
+
+        Ok(PlanNode {
+            kind: PlanNodeKind::Update(UpdatePlan {
+                table_name,
+                table_oid,
+                table_schema,
+                expressions: target_exprs,
+                child: Box::new(filtered_node),
+            }),
+            output_schema,
+        })
     }
 
     fn plan_delete(&self, bound_delete: BoundDelete) -> Result<PlanNode, PlannerError> {
         todo!()
     }
-
 
     fn plan_insert(&self, stmt: BoundInsert) -> Result<PlanNode, PlannerError> {
         let planned_expr_list = self.plan_bound_expression_list(stmt.bound_exprs)?;
@@ -115,7 +183,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             .map(|row| {
                 row.into_iter()
                     .map(|expr| {
-                        let (_, expr) = self.plan_expression(expr, vec![])?;
+                        let (_, expr) = self.plan_expression(expr, &[])?;
                         Ok(expr)
                     })
                     .collect::<Result<Vec<_>, PlannerError>>()
@@ -147,7 +215,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             None => plan,
             Some(where_expr) => {
                 let schema = plan.output_schema().clone();
-                let (_, expr) = self.plan_expression(where_expr, vec![&plan])?;
+                let (_, expr) = self.plan_expression(where_expr, &[&plan])?;
 
                 PlanNode {
                     output_schema: schema,
@@ -165,7 +233,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             let mut names = Vec::with_capacity(stmt.projection.len());
 
             for (idx, expr) in stmt.projection.into_iter().enumerate() {
-                let (name, expr) = self.plan_expression(expr, vec![&plan])?;
+                let (name, expr) = self.plan_expression(expr, &[&plan])?;
                 let name = name.unwrap_or_else(|| format!("__unnamed#{idx}"));
 
                 exprs.push(expr);
@@ -212,7 +280,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
     fn plan_expression(
         &self,
         expr: BoundExpression,
-        children: Vec<&PlanNode>,
+        children: &[&PlanNode],
     ) -> Result<(Option<String>, PlannedExpression), PlannerError> {
         match expr {
             BoundExpression::Literal(value) => Ok((
@@ -222,7 +290,17 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                     kind: PlannedExpressionKind::ConstantValue(ConstantValueExpression { value }),
                 },
             )),
-            BoundExpression::Column(column_ref) => self.plan_column_ref(column_ref, children),
+            BoundExpression::Column(column_ref) => {
+                let (name, column_value_expr, expr_type) =
+                    self.plan_column_ref(column_ref, children)?;
+                Ok((
+                    name,
+                    PlannedExpression {
+                        return_type: expr_type,
+                        kind: PlannedExpressionKind::ColumnValue(column_value_expr),
+                    },
+                ))
+            }
             BoundExpression::BinaryOp { left, op, right } => todo!(),
             BoundExpression::UnaryOp { expr, op } => todo!(),
         }
@@ -231,9 +309,9 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
     fn plan_column_ref(
         &self,
         column_ref: ColumnRef,
-        children: Vec<&PlanNode>,
-    ) -> Result<(Option<String>, PlannedExpression), PlannerError> {
-        match children[..] {
+        children: &[&PlanNode],
+    ) -> Result<(Option<String>, ColumnValueExpression, ExpressionType), PlannerError> {
+        match children {
             [child] => {
                 let col_name = column_ref.to_str();
                 let child_schema = child.output_schema();
@@ -250,13 +328,11 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                     [] => panic!("should not be possible as binder would have caught this?"),
                     [(idx, col)] => Ok((
                         Some(col_name),
-                        PlannedExpression {
-                            return_type: ExpressionType::from_column(col),
-                            kind: PlannedExpressionKind::ColumnValue(ColumnValueExpression {
-                                tuple_idx: 0,
-                                col_idx: idx,
-                            }),
+                        ColumnValueExpression {
+                            tuple_idx: 0,
+                            col_idx: idx,
                         },
+                        ExpressionType::from_column(col),
                     )),
                     _ => Err(PlannerError::AmbiguousColumn(col_name)),
                 }
@@ -317,6 +393,18 @@ mod tests {
         };
 
         planner.plan_insert(insert)
+    }
+
+    fn plan_update_sql(catalog: &Catalog<'_>, sql: &str) -> Result<PlanNode, PlannerError> {
+        let binder = Binder::new(catalog);
+        let planner = Planner::new(catalog);
+        let statement = parse_sql(sql).unwrap();
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Update(update) = bound else {
+            panic!("expected update statement");
+        };
+
+        planner.plan_update(update)
     }
 
     #[test]
@@ -603,6 +691,137 @@ mod tests {
                 ),
             }"#]]
         .assert_eq(&format!("{plan:#?}"));
+    }
+
+    #[test]
+    fn plans_update_values_without_where_clause() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        let plan = plan_sql(&catalog, "update users set name = 'bob'");
+
+        expect![[r#"
+            PlanNode {
+                output_schema: Schema {
+                    inlined_storage_size: 5,
+                    columns: [
+                        Column {
+                            name: "__oxtub_internal.update_rows",
+                            sql_type: Integer,
+                            value_offset: 1,
+                            size: Inline(
+                                4,
+                            ),
+                        },
+                    ],
+                    uninlined_columns: [],
+                },
+                kind: Update(
+                    UpdatePlan {
+                        table_name: "users",
+                        table_oid: 0,
+                        table_schema: Schema {
+                            inlined_storage_size: 9,
+                            columns: [
+                                Column {
+                                    name: "id",
+                                    sql_type: Integer,
+                                    value_offset: 1,
+                                    size: Inline(
+                                        4,
+                                    ),
+                                },
+                                Column {
+                                    name: "name",
+                                    sql_type: Varchar,
+                                    value_offset: 5,
+                                    size: Variable(
+                                        32,
+                                    ),
+                                },
+                            ],
+                            uninlined_columns: [
+                                1,
+                            ],
+                        },
+                        expressions: [
+                            PlannedExpression {
+                                return_type: ExpressionType {
+                                    sql_type: Integer,
+                                    varchar_size: None,
+                                },
+                                kind: ColumnValue(
+                                    ColumnValueExpression {
+                                        tuple_idx: 0,
+                                        col_idx: 0,
+                                    },
+                                ),
+                            },
+                            PlannedExpression {
+                                return_type: ExpressionType {
+                                    sql_type: Varchar,
+                                    varchar_size: Some(
+                                        3,
+                                    ),
+                                },
+                                kind: ConstantValue(
+                                    ConstantValueExpression {
+                                        value: Varchar(
+                                            "bob",
+                                        ),
+                                    },
+                                ),
+                            },
+                        ],
+                        child: PlanNode {
+                            output_schema: Schema {
+                                inlined_storage_size: 9,
+                                columns: [
+                                    Column {
+                                        name: "users.id",
+                                        sql_type: Integer,
+                                        value_offset: 1,
+                                        size: Inline(
+                                            4,
+                                        ),
+                                    },
+                                    Column {
+                                        name: "users.name",
+                                        sql_type: Varchar,
+                                        value_offset: 5,
+                                        size: Variable(
+                                            32,
+                                        ),
+                                    },
+                                ],
+                                uninlined_columns: [
+                                    1,
+                                ],
+                            },
+                            kind: SeqScan(
+                                SeqScanPlan {
+                                    table_name: "users",
+                                    table_oid: 0,
+                                },
+                            ),
+                        },
+                    },
+                ),
+            }"#]]
+        .assert_eq(&format!("{plan:#?}"));
+    }
+
+    #[test]
+    fn rejects_update_when_assignment_type_does_not_match_column() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        let err = plan_update_sql(&catalog, "update users set id = 'bad'")
+            .expect_err("expected update schema mismatch");
+
+        assert!(matches!(err, PlannerError::UpdateSchemaMismatch));
     }
 
     #[test]
