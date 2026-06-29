@@ -13,8 +13,8 @@ use crate::{
                 PlannedExpressionKind,
             },
             plan::{
-                FilterPlan, InsertPlan, PlanNode, PlanNodeKind, ProjectionPlan, SeqScanPlan,
-                UpdatePlan, ValuesPlan,
+                DeletePlan, FilterPlan, InsertPlan, PlanNode, PlanNodeKind, ProjectionPlan,
+                SeqScanPlan, UpdatePlan, ValuesPlan,
             },
         },
     },
@@ -118,7 +118,41 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
     }
 
     fn plan_delete(&self, bound_delete: BoundDelete) -> Result<PlanNode, PlannerError> {
-        todo!()
+        let table_oid = bound_delete.table.tbl_oid();
+
+        let planned_table = self.plan_table_ref(TableRef::BaseTable(bound_delete.table))?;
+        let condition = match bound_delete.filter_expr {
+            Some(expr) => {
+                let (_, expr) = self.plan_expression(expr, &[&planned_table])?;
+                Some(expr)
+            }
+            None => None,
+        };
+
+        let filtered_node = match condition {
+            Some(expr) => PlanNode {
+                output_schema: planned_table.output_schema().clone(),
+                kind: PlanNodeKind::Filter(FilterPlan {
+                    predicate: expr,
+                    child: Box::new(planned_table),
+                }),
+            },
+            None => planned_table,
+        };
+
+        // Number of rows deleted
+        let output_schema = Schema::new(&[Column::new_static(
+            "__oxtub_internal.delete_rows".to_string(),
+            SqlType::Integer,
+        )]);
+
+        Ok(PlanNode {
+            kind: PlanNodeKind::Delete(DeletePlan {
+                table_oid,
+                child: Box::new(filtered_node),
+            }),
+            output_schema,
+        })
     }
 
     fn plan_insert(&self, stmt: BoundInsert) -> Result<PlanNode, PlannerError> {
@@ -405,6 +439,18 @@ mod tests {
         };
 
         planner.plan_update(update)
+    }
+
+    fn plan_delete_sql(catalog: &Catalog<'_>, sql: &str) -> Result<PlanNode, PlannerError> {
+        let binder = Binder::new(catalog);
+        let planner = Planner::new(catalog);
+        let statement = parse_sql(sql).unwrap();
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Delete(delete) = bound else {
+            panic!("expected delete statement");
+        };
+
+        planner.plan_delete(delete)
     }
 
     #[test]
@@ -822,6 +868,83 @@ mod tests {
             .expect_err("expected update schema mismatch");
 
         assert!(matches!(err, PlannerError::UpdateSchemaMismatch));
+    }
+
+    #[test]
+    fn plans_delete_without_where_clause() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        let plan = plan_sql(&catalog, "delete from users");
+
+        expect![[r#"
+            PlanNode {
+                output_schema: Schema {
+                    inlined_storage_size: 5,
+                    columns: [
+                        Column {
+                            name: "__oxtub_internal.delete_rows",
+                            sql_type: Integer,
+                            value_offset: 1,
+                            size: Inline(
+                                4,
+                            ),
+                        },
+                    ],
+                    uninlined_columns: [],
+                },
+                kind: Delete(
+                    DeletePlan {
+                        table_oid: 0,
+                        child: PlanNode {
+                            output_schema: Schema {
+                                inlined_storage_size: 9,
+                                columns: [
+                                    Column {
+                                        name: "users.id",
+                                        sql_type: Integer,
+                                        value_offset: 1,
+                                        size: Inline(
+                                            4,
+                                        ),
+                                    },
+                                    Column {
+                                        name: "users.name",
+                                        sql_type: Varchar,
+                                        value_offset: 5,
+                                        size: Variable(
+                                            32,
+                                        ),
+                                    },
+                                ],
+                                uninlined_columns: [
+                                    1,
+                                ],
+                            },
+                            kind: SeqScan(
+                                SeqScanPlan {
+                                    table_name: "users",
+                                    table_oid: 0,
+                                },
+                            ),
+                        },
+                    },
+                ),
+            }"#]]
+        .assert_eq(&format!("{plan:#?}"));
+    }
+
+    #[test]
+    #[ignore = "TODO: implement binary expression planning"]
+    fn plans_delete_with_where_clause() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        let plan = plan_delete_sql(&catalog, "delete from users where id = 1").unwrap();
+
+        expect![[r#""#]].assert_eq(&format!("{plan:#?}"));
     }
 
     #[test]

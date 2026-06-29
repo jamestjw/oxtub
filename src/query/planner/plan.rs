@@ -27,6 +27,7 @@ pub enum PlanNodeKind {
     Insert(InsertPlan),
     CreateTable(CreateTablePlan),
     Update(UpdatePlan),
+    Delete(DeletePlan),
 }
 
 #[derive(Debug)]
@@ -117,5 +118,11 @@ pub struct UpdatePlan {
     pub table_oid: TableId,
     pub table_schema: Schema,
     pub expressions: Vec<PlannedExpression>,
+    pub child: Box<PlanNode>,
+}
+
+#[derive(Debug)]
+pub struct DeletePlan {
+    pub table_oid: TableId,
     pub child: Box<PlanNode>,
 }
