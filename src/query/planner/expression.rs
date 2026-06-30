@@ -11,6 +11,13 @@ pub struct ExpressionType {
 }
 
 impl ExpressionType {
+    pub fn new_bool() -> Self {
+        Self {
+            sql_type: SqlType::Boolean,
+            varchar_size: None,
+        }
+    }
+
     pub fn from_column(column: &Column) -> Self {
         Self {
             sql_type: column.sql_type(),
@@ -53,8 +60,11 @@ pub struct PlannedExpression {
 pub enum PlannedExpressionKind {
     ColumnValue(ColumnValueExpression),
     ConstantValue(ConstantValueExpression),
-    BinaryOp(BinaryOpExpression),
-    UnaryOp(UnaryOpExpression),
+    Comparison(ComparisonExpression),
+    Arithmetic(ArithmeticExpression),
+    Logic(LogicExpression),
+    // BinaryOp(BinaryOpExpression),
+    // UnaryOp(UnaryOpExpression),
 }
 
 #[derive(Debug)]
@@ -70,14 +80,57 @@ pub struct ConstantValueExpression {
 }
 
 #[derive(Debug)]
-pub struct BinaryOpExpression {
+pub enum ComparisonType {
+    Eq,
+    NotEq,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+}
+
+#[derive(Debug)]
+pub enum ArithmeticType {
+    Plus,
+    Minus,
+}
+
+#[derive(Debug)]
+pub enum LogicType {
+    And,
+    Or,
+}
+
+// #[derive(Debug)]
+// pub struct BinaryOpExpression {
+//     pub left: Box<PlannedExpression>,
+//     pub op: BinaryOperator,
+//     pub right: Box<PlannedExpression>,
+// }
+//
+// #[derive(Debug)]
+// pub struct UnaryOpExpression {
+//     pub op: UnaryOperator,
+//     pub expr: Box<PlannedExpression>,
+// }
+
+#[derive(Debug)]
+pub struct ComparisonExpression {
     pub left: Box<PlannedExpression>,
-    pub op: BinaryOperator,
+    pub comparison_type: ComparisonType,
     pub right: Box<PlannedExpression>,
 }
 
 #[derive(Debug)]
-pub struct UnaryOpExpression {
-    pub op: UnaryOperator,
-    pub expr: Box<PlannedExpression>,
+pub struct ArithmeticExpression {
+    pub left: Box<PlannedExpression>,
+    pub comparison_type: ArithmeticType,
+    pub right: Box<PlannedExpression>,
+}
+
+#[derive(Debug)]
+pub struct LogicExpression {
+    pub left: Box<PlannedExpression>,
+    pub logic_type: LogicType,
+    pub right: Box<PlannedExpression>,
 }

@@ -6,11 +6,13 @@ use crate::{
             statement::{BoundDelete, BoundInsert, BoundSelect, BoundStatement, BoundUpdate},
             table_ref::{BoundExpressionListRef, TableRef},
         },
+        expression::BinaryOperator,
         planner::{
             error::PlannerError,
             expression::{
-                ColumnValueExpression, ConstantValueExpression, ExpressionType, PlannedExpression,
-                PlannedExpressionKind,
+                ColumnValueExpression, ComparisonExpression, ComparisonType,
+                ConstantValueExpression, ExpressionType, LogicExpression, LogicType,
+                PlannedExpression, PlannedExpressionKind,
             },
             plan::{
                 DeletePlan, FilterPlan, InsertPlan, PlanNode, PlanNodeKind, ProjectionPlan,
@@ -335,8 +337,65 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                     },
                 ))
             }
-            BoundExpression::BinaryOp { left, op, right } => todo!(),
+            BoundExpression::BinaryOp { left, op, right } => {
+                let (_, left) = self.plan_expression(*left, children)?;
+                let (_, right) = self.plan_expression(*right, children)?;
+                let expr = match op {
+                    BinaryOperator::Eq => {
+                        Self::make_comparison_expr(left, right, ComparisonType::Eq)
+                    }
+                    BinaryOperator::NotEq => {
+                        Self::make_comparison_expr(left, right, ComparisonType::NotEq)
+                    }
+                    BinaryOperator::Lt => {
+                        Self::make_comparison_expr(left, right, ComparisonType::LessThan)
+                    }
+                    BinaryOperator::LtEq => {
+                        Self::make_comparison_expr(left, right, ComparisonType::LessThanOrEqual)
+                    }
+                    BinaryOperator::Gt => {
+                        Self::make_comparison_expr(left, right, ComparisonType::GreaterThan)
+                    }
+                    BinaryOperator::GtEq => {
+                        Self::make_comparison_expr(left, right, ComparisonType::GreaterThanOrEqual)
+                    }
+                    BinaryOperator::And => Self::make_logic_expr(left, right, LogicType::And),
+                    BinaryOperator::Or => Self::make_logic_expr(left, right, LogicType::Or),
+                };
+
+                Ok((None, expr))
+            }
             BoundExpression::UnaryOp { expr, op } => todo!(),
+        }
+    }
+
+    fn make_comparison_expr(
+        left: PlannedExpression,
+        right: PlannedExpression,
+        comparison_type: ComparisonType,
+    ) -> PlannedExpression {
+        PlannedExpression {
+            return_type: ExpressionType::new_bool(),
+            kind: PlannedExpressionKind::Comparison(ComparisonExpression {
+                left: Box::new(left),
+                right: Box::new(right),
+                comparison_type,
+            }),
+        }
+    }
+
+    fn make_logic_expr(
+        left: PlannedExpression,
+        right: PlannedExpression,
+        logic_type: LogicType,
+    ) -> PlannedExpression {
+        PlannedExpression {
+            return_type: ExpressionType::new_bool(),
+            kind: PlannedExpressionKind::Logic(LogicExpression {
+                left: Box::new(left),
+                right: Box::new(right),
+                logic_type,
+            }),
         }
     }
 
@@ -936,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TODO: implement binary expression planning"]
+    // #[ignore = "TODO: implement binary expression planning"]
     fn plans_delete_with_where_clause() {
         let bpm = setup_bpm(3);
         let mut catalog = Catalog::new(&bpm);
