@@ -342,6 +342,8 @@ fn convert_unary_op(op: SqlUnaryOperator) -> Result<UnaryOperator, QueryError> {
 
 fn convert_binary_op(op: SqlBinaryOperator) -> Result<BinaryOperator, QueryError> {
     match op {
+        SqlBinaryOperator::Plus => Ok(BinaryOperator::Plus),
+        SqlBinaryOperator::Minus => Ok(BinaryOperator::Minus),
         SqlBinaryOperator::Eq => Ok(BinaryOperator::Eq),
         SqlBinaryOperator::NotEq => Ok(BinaryOperator::NotEq),
         SqlBinaryOperator::Lt => Ok(BinaryOperator::Lt),
@@ -467,6 +469,14 @@ mod tests {
                 .unwrap();
 
         expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(UnaryOp { op: Not, expr: Column("active") }), Expression(UnaryOp { op: Neg, expr: Column("score") }), Expression(UnaryOp { op: IsNull, expr: Column("name") }), Expression(UnaryOp { op: IsNotNull, expr: Column("name") })], where_clause: None })"#]]
+            .assert_eq(&format!("{statement:?}"));
+    }
+
+    #[test]
+    fn parses_select_projection_arithmetic_operators() {
+        let statement = parse_sql("select score + 1, score - 1, -score + 1 from users").unwrap();
+
+        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(BinaryOp { left: Column("score"), op: Plus, right: Literal(Integer(1)) }), Expression(BinaryOp { left: Column("score"), op: Minus, right: Literal(Integer(1)) }), Expression(BinaryOp { left: UnaryOp { op: Neg, expr: Column("score") }, op: Plus, right: Literal(Integer(1)) })], where_clause: None })"#]]
             .assert_eq(&format!("{statement:?}"));
     }
 

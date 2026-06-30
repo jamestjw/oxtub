@@ -1,6 +1,5 @@
 use crate::{
     catalog::{column::Column, types::SqlType},
-    query::expression::{BinaryOperator, UnaryOperator},
     types::value::Value,
 };
 
@@ -63,8 +62,9 @@ pub enum PlannedExpressionKind {
     Comparison(ComparisonExpression),
     Arithmetic(ArithmeticExpression),
     Logic(LogicExpression),
-    // BinaryOp(BinaryOpExpression),
-    // UnaryOp(UnaryOpExpression),
+    Not(NotExpression),
+    Negate(NegateExpression),
+    NullCheck(NullCheckExpression),
 }
 
 #[derive(Debug)]
@@ -101,18 +101,11 @@ pub enum LogicType {
     Or,
 }
 
-// #[derive(Debug)]
-// pub struct BinaryOpExpression {
-//     pub left: Box<PlannedExpression>,
-//     pub op: BinaryOperator,
-//     pub right: Box<PlannedExpression>,
-// }
-//
-// #[derive(Debug)]
-// pub struct UnaryOpExpression {
-//     pub op: UnaryOperator,
-//     pub expr: Box<PlannedExpression>,
-// }
+#[derive(Debug)]
+pub enum NullCheckType {
+    IsNull,
+    IsNotNull,
+}
 
 #[derive(Debug)]
 pub struct ComparisonExpression {
@@ -124,7 +117,7 @@ pub struct ComparisonExpression {
 #[derive(Debug)]
 pub struct ArithmeticExpression {
     pub left: Box<PlannedExpression>,
-    pub comparison_type: ArithmeticType,
+    pub arithmetic_type: ArithmeticType,
     pub right: Box<PlannedExpression>,
 }
 
@@ -133,4 +126,20 @@ pub struct LogicExpression {
     pub left: Box<PlannedExpression>,
     pub logic_type: LogicType,
     pub right: Box<PlannedExpression>,
+}
+
+#[derive(Debug)]
+pub struct NotExpression {
+    pub expr: Box<PlannedExpression>,
+}
+
+#[derive(Debug)]
+pub struct NegateExpression {
+    pub expr: Box<PlannedExpression>,
+}
+
+#[derive(Debug)]
+pub struct NullCheckExpression {
+    pub expr: Box<PlannedExpression>,
+    pub null_check_type: NullCheckType,
 }

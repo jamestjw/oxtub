@@ -6,12 +6,13 @@ use crate::{
             statement::{BoundDelete, BoundInsert, BoundSelect, BoundStatement, BoundUpdate},
             table_ref::{BoundExpressionListRef, TableRef},
         },
-        expression::BinaryOperator,
+        expression::{BinaryOperator, UnaryOperator},
         planner::{
             error::PlannerError,
             expression::{
-                ColumnValueExpression, ComparisonExpression, ComparisonType,
-                ConstantValueExpression, ExpressionType, LogicExpression, LogicType,
+                ArithmeticExpression, ArithmeticType, ColumnValueExpression, ComparisonExpression,
+                ComparisonType, ConstantValueExpression, ExpressionType, LogicExpression,
+                LogicType, NegateExpression, NotExpression, NullCheckExpression, NullCheckType,
                 PlannedExpression, PlannedExpressionKind,
             },
             plan::{
@@ -341,6 +342,12 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                 let (_, left) = self.plan_expression(*left, children)?;
                 let (_, right) = self.plan_expression(*right, children)?;
                 let expr = match op {
+                    BinaryOperator::Plus => {
+                        Self::make_arithmetic_expr(left, right, ArithmeticType::Plus)
+                    }
+                    BinaryOperator::Minus => {
+                        Self::make_arithmetic_expr(left, right, ArithmeticType::Minus)
+                    }
                     BinaryOperator::Eq => {
                         Self::make_comparison_expr(left, right, ComparisonType::Eq)
                     }
@@ -365,7 +372,37 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
 
                 Ok((None, expr))
             }
-            BoundExpression::UnaryOp { expr, op } => todo!(),
+            BoundExpression::UnaryOp { expr, op } => {
+                let (_, expr) = self.plan_expression(*expr, children)?;
+                let expr = match op {
+                    UnaryOperator::Not => Self::make_not_expr(expr),
+                    UnaryOperator::Neg => Self::make_negate_expr(expr),
+                    UnaryOperator::IsNull => {
+                        Self::make_null_check_expr(expr, NullCheckType::IsNull)
+                    }
+                    UnaryOperator::IsNotNull => {
+                        Self::make_null_check_expr(expr, NullCheckType::IsNotNull)
+                    }
+                };
+
+                Ok((None, expr))
+            }
+        }
+    }
+
+    fn make_arithmetic_expr(
+        left: PlannedExpression,
+        right: PlannedExpression,
+        arithmetic_type: ArithmeticType,
+    ) -> PlannedExpression {
+        let return_type = left.return_type;
+        PlannedExpression {
+            return_type,
+            kind: PlannedExpressionKind::Arithmetic(ArithmeticExpression {
+                left: Box::new(left),
+                right: Box::new(right),
+                arithmetic_type,
+            }),
         }
     }
 
@@ -395,6 +432,38 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                 left: Box::new(left),
                 right: Box::new(right),
                 logic_type,
+            }),
+        }
+    }
+
+    fn make_not_expr(expr: PlannedExpression) -> PlannedExpression {
+        PlannedExpression {
+            return_type: ExpressionType::new_bool(),
+            kind: PlannedExpressionKind::Not(NotExpression {
+                expr: Box::new(expr),
+            }),
+        }
+    }
+
+    fn make_negate_expr(expr: PlannedExpression) -> PlannedExpression {
+        let return_type = expr.return_type;
+        PlannedExpression {
+            return_type,
+            kind: PlannedExpressionKind::Negate(NegateExpression {
+                expr: Box::new(expr),
+            }),
+        }
+    }
+
+    fn make_null_check_expr(
+        expr: PlannedExpression,
+        null_check_type: NullCheckType,
+    ) -> PlannedExpression {
+        PlannedExpression {
+            return_type: ExpressionType::new_bool(),
+            kind: PlannedExpressionKind::NullCheck(NullCheckExpression {
+                expr: Box::new(expr),
+                null_check_type,
             }),
         }
     }
@@ -510,6 +579,15 @@ mod tests {
         };
 
         planner.plan_delete(delete)
+    }
+
+    fn projection_expression(plan: &PlanNode) -> &PlannedExpression {
+        let PlanNodeKind::Projection(projection) = &plan.kind else {
+            panic!("expected projection plan");
+        };
+
+        assert_eq!(projection.expressions.len(), 1);
+        &projection.expressions[0]
     }
 
     #[test]
@@ -633,6 +711,72 @@ mod tests {
                 ),
             }"#]]
         .assert_eq(&format!("{plan:#?}"));
+    }
+
+    #[test]
+    fn plans_select_arithmetic_projection() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        let plan = plan_sql(&catalog, "select id + 1 from users");
+
+        let expr = projection_expression(&plan);
+        assert_eq!(expr.return_type.sql_type, SqlType::Integer);
+        assert!(matches!(
+            expr.kind,
+            PlannedExpressionKind::Arithmetic(ArithmeticExpression {
+                arithmetic_type: ArithmeticType::Plus,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn plans_select_subtraction_projection() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        let plan = plan_sql(&catalog, "select id - 1 from users");
+
+        let expr = projection_expression(&plan);
+        assert_eq!(expr.return_type.sql_type, SqlType::Integer);
+        assert!(matches!(
+            expr.kind,
+            PlannedExpressionKind::Arithmetic(ArithmeticExpression {
+                arithmetic_type: ArithmeticType::Minus,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn plans_select_unary_projection() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        let plan = plan_sql(&catalog, "select -id from users");
+        let expr = projection_expression(&plan);
+        assert_eq!(expr.return_type.sql_type, SqlType::Integer);
+        assert!(matches!(expr.kind, PlannedExpressionKind::Negate(_)));
+
+        let plan = plan_sql(&catalog, "select not (id = 1) from users");
+        let expr = projection_expression(&plan);
+        assert_eq!(expr.return_type.sql_type, SqlType::Boolean);
+        assert!(matches!(expr.kind, PlannedExpressionKind::Not(_)));
+
+        let plan = plan_sql(&catalog, "select name is not null from users");
+        let expr = projection_expression(&plan);
+        assert_eq!(expr.return_type.sql_type, SqlType::Boolean);
+        assert!(matches!(
+            expr.kind,
+            PlannedExpressionKind::NullCheck(NullCheckExpression {
+                null_check_type: NullCheckType::IsNotNull,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -995,7 +1139,6 @@ mod tests {
     }
 
     #[test]
-    // #[ignore = "TODO: implement binary expression planning"]
     fn plans_delete_with_where_clause() {
         let bpm = setup_bpm(3);
         let mut catalog = Catalog::new(&bpm);
@@ -1003,7 +1146,16 @@ mod tests {
 
         let plan = plan_delete_sql(&catalog, "delete from users where id = 1").unwrap();
 
-        expect![[r#""#]].assert_eq(&format!("{plan:#?}"));
+        let PlanNodeKind::Delete(delete) = &plan.kind else {
+            panic!("expected delete plan");
+        };
+        let PlanNodeKind::Filter(filter) = &delete.child.kind else {
+            panic!("expected filter below delete");
+        };
+        assert!(matches!(
+            filter.predicate.kind,
+            PlannedExpressionKind::Comparison(_)
+        ));
     }
 
     #[test]

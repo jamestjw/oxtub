@@ -17,6 +17,8 @@ pub enum Expression {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOperator {
+    Plus,
+    Minus,
     Eq,
     NotEq,
     Lt,
