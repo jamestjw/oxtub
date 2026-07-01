@@ -3,8 +3,8 @@ use crate::{
     query::{
         executor::{engine::ExecutorRow, error::ExecutionError},
         planner::expression::{
-            ConstantValueExpression, LogicExpression, LogicType, PlannedExpression,
-            PlannedExpressionKind,
+            ConstantValueExpression, LogicExpression, LogicType, NegateExpression,
+            PlannedExpression, PlannedExpressionKind,
         },
     },
     types::value::Value,
@@ -41,7 +41,15 @@ pub fn evaluate_expression(
                 CmpBool::Null => Ok(Value::Null(SqlType::Boolean)),
             }
         }
-        PlannedExpressionKind::Negate(negate_expression) => todo!(),
+        PlannedExpressionKind::Negate(NegateExpression { expr }) => {
+            match evaluate_expression(expr, row)? {
+                Value::SmallInt(i) => Ok(Value::SmallInt(!i)),
+                Value::Integer(i) => Ok(Value::Integer(!i)),
+                Value::BigInt(i) => Ok(Value::BigInt(!i)),
+                v @ Value::Null(SqlType::BigInt | SqlType::Integer | SqlType::SmallInt) => Ok(v),
+                v => Err(ExecutionError::ExpectedInteger(v)),
+            }
+        }
         PlannedExpressionKind::NullCheck(null_check_expression) => todo!(),
     }
 }

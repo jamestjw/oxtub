@@ -15,6 +15,12 @@ pub enum ExecutionError {
     #[error("expected boolean expression, got {0:?}")]
     ExpectedBoolean(Value),
 
+    #[error("expected numeric expression, got {0:?}")]
+    ExpectedNumeric(Value),
+
+    #[error("expected integer expression, got {0:?}")]
+    ExpectedInteger(Value),
+
     #[error("missing rid for delete")]
     MissingRid,
 
