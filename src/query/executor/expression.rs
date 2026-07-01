@@ -3,8 +3,9 @@ use crate::{
     query::{
         executor::{engine::ExecutorRow, error::ExecutionError},
         planner::expression::{
-            ConstantValueExpression, LogicExpression, LogicType, NegateExpression,
-            PlannedExpression, PlannedExpressionKind,
+            ColumnValueExpression, ConstantValueExpression, LogicExpression, LogicType,
+            NegateExpression, NullCheckExpression, NullCheckType, PlannedExpression,
+            PlannedExpressionKind,
         },
     },
     types::value::Value,
@@ -15,7 +16,11 @@ pub fn evaluate_expression(
     row: &ExecutorRow,
 ) -> Result<Value, ExecutionError> {
     match &expr.kind {
-        PlannedExpressionKind::ColumnValue(column_value_expression) => todo!(),
+        PlannedExpressionKind::ColumnValue(ColumnValueExpression { tuple_idx, col_idx }) => {
+            assert_eq!(*tuple_idx, 0);
+            // TODO: we should handle joins separately
+            Ok(row.values[*col_idx].clone())
+        }
         PlannedExpressionKind::ConstantValue(ConstantValueExpression { value }) => {
             Ok(value.clone())
         }
@@ -43,14 +48,34 @@ pub fn evaluate_expression(
         }
         PlannedExpressionKind::Negate(NegateExpression { expr }) => {
             match evaluate_expression(expr, row)? {
-                Value::SmallInt(i) => Ok(Value::SmallInt(!i)),
-                Value::Integer(i) => Ok(Value::Integer(!i)),
-                Value::BigInt(i) => Ok(Value::BigInt(!i)),
-                v @ Value::Null(SqlType::BigInt | SqlType::Integer | SqlType::SmallInt) => Ok(v),
-                v => Err(ExecutionError::ExpectedInteger(v)),
+                Value::SmallInt(i) => i
+                    .checked_neg()
+                    .map(Value::SmallInt)
+                    .ok_or(ExecutionError::NumericOutOfRange),
+                Value::Integer(i) => i
+                    .checked_neg()
+                    .map(Value::Integer)
+                    .ok_or(ExecutionError::NumericOutOfRange),
+                Value::BigInt(i) => i
+                    .checked_neg()
+                    .map(Value::BigInt)
+                    .ok_or(ExecutionError::NumericOutOfRange),
+                Value::Decimal(f) => Ok(Value::Decimal(-f)),
+                v @ Value::Null(
+                    SqlType::BigInt | SqlType::Decimal | SqlType::Integer | SqlType::SmallInt,
+                ) => Ok(v),
+                v => Err(ExecutionError::ExpectedNumeric(v)),
             }
         }
-        PlannedExpressionKind::NullCheck(null_check_expression) => todo!(),
+        PlannedExpressionKind::NullCheck(NullCheckExpression {
+            expr,
+            null_check_type,
+        }) => match (null_check_type, evaluate_expression(expr, row)?) {
+            (NullCheckType::IsNull, Value::Null(_)) => Ok(Value::Boolean(true)),
+            (NullCheckType::IsNull, _) => Ok(Value::Boolean(false)),
+            (NullCheckType::IsNotNull, Value::Null(_)) => Ok(Value::Boolean(false)),
+            (NullCheckType::IsNotNull, _) => Ok(Value::Boolean(true)),
+        },
     }
 }
 

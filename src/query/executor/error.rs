@@ -21,6 +21,9 @@ pub enum ExecutionError {
     #[error("expected integer expression, got {0:?}")]
     ExpectedInteger(Value),
 
+    #[error("numeric value out of range")]
+    NumericOutOfRange,
+
     #[error("missing rid for delete")]
     MissingRid,
 
