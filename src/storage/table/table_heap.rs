@@ -101,6 +101,14 @@ impl<'a> TableHeap<'a> {
                 .into(),
         }
     }
+
+    pub fn update_meta(&self, rid: Rid, meta: TupleMeta) -> Result<(), TableHeapError> {
+        let mut page_guard = self.bpm.write_page(rid.page_id)?;
+        let mut page = TablePageMut::from_data(page_guard.data_mut());
+        page.update_tuple_meta(rid.slot_id as usize, meta);
+
+        Ok(())
+    }
 }
 
 pub struct TableHeapIterator<'a> {
