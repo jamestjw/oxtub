@@ -28,10 +28,11 @@ impl<'plan> ProjectionExecutor<'plan> {
 
 impl Executor for ProjectionExecutor<'_> {
     fn init(&mut self) -> Result<(), ExecutionError> {
-        todo!("init projection executor")
+        self.child.init()
     }
 
-    fn next(&mut self, _batch_size: usize) -> Result<Vec<ExecutorRow>, ExecutionError> {
+    fn next(&mut self, batch_size: usize) -> Result<Vec<ExecutorRow>, ExecutionError> {
+        let batch = self.child.next(batch_size)?;
         todo!("next projection executor")
     }
 
