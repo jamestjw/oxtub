@@ -90,7 +90,7 @@ impl<'a> TableHeap<'a> {
         Ok(page.get_tuple(rid.slot_id as usize))
     }
 
-    pub fn iter(&self) -> TableHeapIterator<'_> {
+    pub fn iter(&self) -> TableHeapIterator<'a> {
         TableHeapIterator {
             bpm: self.bpm,
             idx: 0,

@@ -43,7 +43,7 @@ impl<'a> Catalog<'a> {
         &mut self,
         name: String,
         schema: Schema,
-    ) -> Result<&TableInfo<'_>, CatalogError> {
+    ) -> Result<&TableInfo<'a>, CatalogError> {
         if self.table_names.contains_key(&name) {
             return Err(CatalogError::DuplicateTable(name));
         }
@@ -59,7 +59,7 @@ impl<'a> Catalog<'a> {
         Ok(self.tables.get(&table_oid).unwrap())
     }
 
-    pub fn get_tbl_by_name(&self, name: &str) -> Result<&TableInfo<'_>, CatalogError> {
+    pub fn get_tbl_by_name(&self, name: &str) -> Result<&TableInfo<'a>, CatalogError> {
         match self.table_names.get(name) {
             Some(table_oid) => match self.tables.get(table_oid) {
                 Some(info) => Ok(info),
@@ -69,7 +69,7 @@ impl<'a> Catalog<'a> {
         }
     }
 
-    pub fn get_tbl_by_oid(&self, oid: TableId) -> Result<&TableInfo<'_>, CatalogError> {
+    pub fn get_tbl_by_oid(&self, oid: TableId) -> Result<&TableInfo<'a>, CatalogError> {
         match self.tables.get(&oid) {
             Some(info) => Ok(info),
             None => Err(CatalogError::TableNotFound(oid.into())),
