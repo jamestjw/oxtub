@@ -3,9 +3,9 @@ use crate::{
     query::{
         executor::{engine::ExecutorRow, error::ExecutionError},
         planner::expression::{
-            ColumnValueExpression, ConstantValueExpression, LogicExpression, LogicType,
-            NegateExpression, NullCheckExpression, NullCheckType, PlannedExpression,
-            PlannedExpressionKind,
+            ArithmeticExpression, ArithmeticType, ColumnValueExpression, ConstantValueExpression,
+            LogicExpression, LogicType, NegateExpression, NullCheckExpression, NullCheckType,
+            PlannedExpression, PlannedExpressionKind,
         },
     },
     types::value::Value,
@@ -25,7 +25,19 @@ pub fn evaluate_expression(
             Ok(value.clone())
         }
         PlannedExpressionKind::Comparison(comparison_expression) => todo!(),
-        PlannedExpressionKind::Arithmetic(arithmetic_expression) => todo!(),
+        PlannedExpressionKind::Arithmetic(ArithmeticExpression {
+            left,
+            arithmetic_type,
+            right,
+        }) => {
+            let left_value = evaluate_expression(left, row)?;
+            let right_value = evaluate_expression(right, row)?;
+
+            match arithmetic_type {
+                ArithmeticType::Plus => eval_numeric_arithmetic(left_value, right_value, eval_add),
+                ArithmeticType::Minus => eval_numeric_arithmetic(left_value, right_value, eval_sub),
+            }
+        }
         PlannedExpressionKind::Logic(LogicExpression {
             left,
             logic_type,
@@ -83,6 +95,104 @@ enum CmpBool {
     True,
     False,
     Null,
+}
+
+enum CmpNumeric {
+    SmallInt(i16),
+    Integer(i32),
+    BigInt(i64),
+    Decimal(f64),
+}
+
+fn eval_numeric_arithmetic(
+    left: Value,
+    right: Value,
+    op: fn(CmpNumeric, CmpNumeric) -> Result<Value, ExecutionError>,
+) -> Result<Value, ExecutionError> {
+    let result_type = numeric_result_type(&left, &right)?;
+
+    if left.is_null() || right.is_null() {
+        return Ok(Value::Null(result_type));
+    }
+
+    let left = cast_numeric(left, result_type).unwrap();
+    let right = cast_numeric(right, result_type).unwrap();
+    op(left, right)
+}
+
+fn numeric_result_type(left: &Value, right: &Value) -> Result<SqlType, ExecutionError> {
+    let left_type = expect_numeric_type(left)?;
+    let right_type = expect_numeric_type(right)?;
+
+    match (left_type, right_type) {
+        (SqlType::Decimal, _) | (_, SqlType::Decimal) => Ok(SqlType::Decimal),
+        (SqlType::BigInt, _) | (_, SqlType::BigInt) => Ok(SqlType::BigInt),
+        (SqlType::Integer, _) | (_, SqlType::Integer) => Ok(SqlType::Integer),
+        (SqlType::SmallInt, SqlType::SmallInt) => Ok(SqlType::SmallInt),
+        _ => unreachable!("numeric types should have been validated"),
+    }
+}
+
+fn expect_numeric_type(value: &Value) -> Result<SqlType, ExecutionError> {
+    let sql_type = value.sql_type();
+    match sql_type {
+        SqlType::SmallInt | SqlType::Integer | SqlType::BigInt | SqlType::Decimal => Ok(sql_type),
+        _ => Err(ExecutionError::ExpectedNumeric(value.clone())),
+    }
+}
+
+fn cast_numeric(value: Value, target_type: SqlType) -> Result<CmpNumeric, ExecutionError> {
+    match (value, target_type) {
+        (Value::SmallInt(i), SqlType::SmallInt) => Ok(CmpNumeric::SmallInt(i)),
+        (Value::SmallInt(i), SqlType::Integer) => Ok(CmpNumeric::Integer(i.into())),
+        (Value::SmallInt(i), SqlType::BigInt) => Ok(CmpNumeric::BigInt(i.into())),
+        (Value::SmallInt(i), SqlType::Decimal) => Ok(CmpNumeric::Decimal(i.into())),
+        (Value::Integer(i), SqlType::Integer) => Ok(CmpNumeric::Integer(i)),
+        (Value::Integer(i), SqlType::BigInt) => Ok(CmpNumeric::BigInt(i.into())),
+        (Value::Integer(i), SqlType::Decimal) => Ok(CmpNumeric::Decimal(i.into())),
+        (Value::BigInt(i), SqlType::BigInt) => Ok(CmpNumeric::BigInt(i)),
+        (Value::BigInt(i), SqlType::Decimal) => Ok(CmpNumeric::Decimal(i as f64)),
+        (Value::Decimal(f), SqlType::Decimal) => Ok(CmpNumeric::Decimal(f)),
+        (value, _) => Err(ExecutionError::ExpectedNumeric(value)),
+    }
+}
+
+fn eval_add(left: CmpNumeric, right: CmpNumeric) -> Result<Value, ExecutionError> {
+    match (left, right) {
+        (CmpNumeric::SmallInt(left), CmpNumeric::SmallInt(right)) => left
+            .checked_add(right)
+            .map(Value::SmallInt)
+            .ok_or(ExecutionError::NumericOutOfRange),
+        (CmpNumeric::Integer(left), CmpNumeric::Integer(right)) => left
+            .checked_add(right)
+            .map(Value::Integer)
+            .ok_or(ExecutionError::NumericOutOfRange),
+        (CmpNumeric::BigInt(left), CmpNumeric::BigInt(right)) => left
+            .checked_add(right)
+            .map(Value::BigInt)
+            .ok_or(ExecutionError::NumericOutOfRange),
+        (CmpNumeric::Decimal(left), CmpNumeric::Decimal(right)) => Ok(Value::Decimal(left + right)),
+        _ => unreachable!("numeric operands should be widened to the same type"),
+    }
+}
+
+fn eval_sub(left: CmpNumeric, right: CmpNumeric) -> Result<Value, ExecutionError> {
+    match (left, right) {
+        (CmpNumeric::SmallInt(left), CmpNumeric::SmallInt(right)) => left
+            .checked_sub(right)
+            .map(Value::SmallInt)
+            .ok_or(ExecutionError::NumericOutOfRange),
+        (CmpNumeric::Integer(left), CmpNumeric::Integer(right)) => left
+            .checked_sub(right)
+            .map(Value::Integer)
+            .ok_or(ExecutionError::NumericOutOfRange),
+        (CmpNumeric::BigInt(left), CmpNumeric::BigInt(right)) => left
+            .checked_sub(right)
+            .map(Value::BigInt)
+            .ok_or(ExecutionError::NumericOutOfRange),
+        (CmpNumeric::Decimal(left), CmpNumeric::Decimal(right)) => Ok(Value::Decimal(left - right)),
+        _ => unreachable!("numeric operands should be widened to the same type"),
+    }
 }
 
 fn expect_bool(value: Value) -> Result<CmpBool, ExecutionError> {
