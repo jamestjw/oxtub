@@ -21,6 +21,9 @@ pub enum ExecutionError {
     #[error("expected integer expression, got {0:?}")]
     ExpectedInteger(Value),
 
+    #[error("cannot compare values {0:?} and {1:?}")]
+    ComparisonTypeMismatch(Value, Value),
+
     #[error("numeric value out of range")]
     NumericOutOfRange,
 

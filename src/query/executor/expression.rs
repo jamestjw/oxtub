@@ -3,9 +3,9 @@ use crate::{
     query::{
         executor::{engine::ExecutorRow, error::ExecutionError},
         planner::expression::{
-            ArithmeticExpression, ArithmeticType, ColumnValueExpression, ConstantValueExpression,
-            LogicExpression, LogicType, NegateExpression, NullCheckExpression, NullCheckType,
-            PlannedExpression, PlannedExpressionKind,
+            ArithmeticExpression, ArithmeticType, ColumnValueExpression, ComparisonExpression,
+            ComparisonType, ConstantValueExpression, LogicExpression, LogicType, NegateExpression,
+            NullCheckExpression, NullCheckType, PlannedExpression, PlannedExpressionKind,
         },
     },
     types::value::Value,
@@ -24,7 +24,15 @@ pub fn evaluate_expression(
         PlannedExpressionKind::ConstantValue(ConstantValueExpression { value }) => {
             Ok(value.clone())
         }
-        PlannedExpressionKind::Comparison(comparison_expression) => todo!(),
+        PlannedExpressionKind::Comparison(ComparisonExpression {
+            left,
+            comparison_type,
+            right,
+        }) => {
+            let left_value = evaluate_expression(left, row)?;
+            let right_value = evaluate_expression(right, row)?;
+            eval_comparison(left_value, right_value, comparison_type)
+        }
         PlannedExpressionKind::Arithmetic(ArithmeticExpression {
             left,
             arithmetic_type,
@@ -102,6 +110,94 @@ enum CmpNumeric {
     Integer(i32),
     BigInt(i64),
     Decimal(f64),
+}
+
+fn eval_comparison(
+    left: Value,
+    right: Value,
+    comparison_type: &ComparisonType,
+) -> Result<Value, ExecutionError> {
+    if can_compare_as_numeric(&left, &right) {
+        return eval_numeric_comparison(left, right, comparison_type);
+    }
+
+    if left.is_null() || right.is_null() {
+        if left.sql_type() == right.sql_type() {
+            return Ok(Value::Null(SqlType::Boolean));
+        }
+        return Err(ExecutionError::ComparisonTypeMismatch(left, right));
+    }
+
+    let res = match (left, right) {
+        (Value::Boolean(left), Value::Boolean(right)) => {
+            eval_ord_comparison(left, right, comparison_type)
+        }
+        (Value::Varchar(left), Value::Varchar(right)) => {
+            eval_ord_comparison(left, right, comparison_type)
+        }
+        (left, right) => return Err(ExecutionError::ComparisonTypeMismatch(left, right)),
+    };
+
+    Ok(Value::Boolean(res))
+}
+
+fn eval_numeric_comparison(
+    left: Value,
+    right: Value,
+    comparison_type: &ComparisonType,
+) -> Result<Value, ExecutionError> {
+    let result_type = numeric_result_type(&left, &right)?;
+
+    if left.is_null() || right.is_null() {
+        return Ok(Value::Null(SqlType::Boolean));
+    }
+
+    let left = cast_numeric(left, result_type).unwrap();
+    let right = cast_numeric(right, result_type).unwrap();
+
+    let res = match (left, right) {
+        (CmpNumeric::SmallInt(left), CmpNumeric::SmallInt(right)) => {
+            eval_ord_comparison(left, right, comparison_type)
+        }
+        (CmpNumeric::Integer(left), CmpNumeric::Integer(right)) => {
+            eval_ord_comparison(left, right, comparison_type)
+        }
+        (CmpNumeric::BigInt(left), CmpNumeric::BigInt(right)) => {
+            eval_ord_comparison(left, right, comparison_type)
+        }
+        (CmpNumeric::Decimal(left), CmpNumeric::Decimal(right)) => {
+            eval_ord_comparison(left, right, comparison_type)
+        }
+        _ => unreachable!("numeric operands should be widened to the same type"),
+    };
+
+    Ok(Value::Boolean(res))
+}
+
+fn eval_ord_comparison<T: PartialEq + PartialOrd>(
+    left: T,
+    right: T,
+    comparison_type: &ComparisonType,
+) -> bool {
+    match comparison_type {
+        ComparisonType::Eq => left == right,
+        ComparisonType::NotEq => left != right,
+        ComparisonType::LessThan => left < right,
+        ComparisonType::LessThanOrEqual => left <= right,
+        ComparisonType::GreaterThan => left > right,
+        ComparisonType::GreaterThanOrEqual => left >= right,
+    }
+}
+
+fn can_compare_as_numeric(left: &Value, right: &Value) -> bool {
+    is_numeric_type(left.sql_type()) && is_numeric_type(right.sql_type())
+}
+
+fn is_numeric_type(sql_type: SqlType) -> bool {
+    matches!(
+        sql_type,
+        SqlType::SmallInt | SqlType::Integer | SqlType::BigInt | SqlType::Decimal
+    )
 }
 
 fn eval_numeric_arithmetic(
