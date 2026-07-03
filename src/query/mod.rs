@@ -1,4 +1,5 @@
 pub mod binder;
+pub mod engine;
 pub mod error;
 pub mod executor;
 pub mod expression;
