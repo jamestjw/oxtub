@@ -1,15 +1,21 @@
 use crate::{
     catalog::schema::Schema,
     query::{
-        executor::{engine::ExecutorRow, error::ExecutionError, executor::Executor},
+        executor::{
+            engine::ExecutorRow, error::ExecutionError, executor::Executor,
+            expression::evaluate_expression,
+        },
+        planner::expression::PlannedExpression,
         planner::plan::FilterPlan,
     },
+    types::value::Value,
 };
 
 pub struct FilterExecutor<'plan> {
     plan: &'plan FilterPlan,
     output_schema: &'plan Schema,
     child: Box<dyn Executor + 'plan>,
+    buffered_rows: std::vec::IntoIter<ExecutorRow>,
 }
 
 impl<'plan> FilterExecutor<'plan> {
@@ -22,17 +28,55 @@ impl<'plan> FilterExecutor<'plan> {
             plan,
             output_schema,
             child,
+            buffered_rows: Vec::new().into_iter(),
         }
+    }
+}
+
+fn keep_row(predicate: &PlannedExpression, row: &ExecutorRow) -> Result<bool, ExecutionError> {
+    match evaluate_expression(predicate, row)? {
+        Value::Boolean(true) => Ok(true),
+        Value::Boolean(false) | Value::Null(_) => Ok(false),
+        value => Err(ExecutionError::ExpectedBoolean(value)),
     }
 }
 
 impl Executor for FilterExecutor<'_> {
     fn init(&mut self) -> Result<(), ExecutionError> {
-        todo!("init filter executor")
+        self.child.init()
     }
 
-    fn next(&mut self, _batch_size: usize) -> Result<Vec<ExecutorRow>, ExecutionError> {
-        todo!("next filter executor")
+    fn next(&mut self, batch_size: usize) -> Result<Vec<ExecutorRow>, ExecutionError> {
+        let mut out = Vec::with_capacity(batch_size);
+        let predicate = &self.plan.predicate;
+
+        loop {
+            while let Some(row) = self.buffered_rows.next() {
+                if keep_row(predicate, &row)? {
+                    out.push(row);
+
+                    if out.len() == batch_size {
+                        return Ok(out);
+                    }
+                }
+            }
+
+            let batch = self.child.next(batch_size)?;
+            if batch.is_empty() {
+                return Ok(out);
+            }
+
+            self.buffered_rows = batch.into_iter();
+            while let Some(row) = self.buffered_rows.next() {
+                if keep_row(predicate, &row)? {
+                    out.push(row);
+
+                    if out.len() == batch_size {
+                        return Ok(out);
+                    }
+                }
+            }
+        }
     }
 
     fn output_schema(&self) -> &Schema {
