@@ -9,7 +9,7 @@ use crate::{
             transformer::Binder,
         },
         error::QueryError,
-        executor::{engine::ExecutionResult, error::ExecutionError},
+        executor::{ExecutionEngine, engine::ExecutionResult, error::ExecutionError},
         parser::parse_sql,
         planner::{error::PlannerError, transformer::Planner},
     },
@@ -72,8 +72,7 @@ impl<'catalog, 'bpm> QueryEngine<'catalog, 'bpm> {
             | BoundStatement::Update(_)
             | BoundStatement::Delete(_) => {
                 let plan = Planner::new(self.catalog).plan_statement(bound_statement)?;
-                let execution_engine =
-                    crate::query::executor::engine::ExecutionEngine::new(self.catalog);
+                let execution_engine = ExecutionEngine::new(self.catalog);
 
                 Ok(QueryResult::Rows(
                     execution_engine.execute(plan, batch_size)?,
@@ -91,10 +90,29 @@ impl<'catalog, 'bpm> QueryEngine<'catalog, 'bpm> {
         BoundCreateTable {
             name,
             columns,
-            primary_key_cols,
+            primary_key_col_idxs,
         }: BoundCreateTable,
     ) -> Result<QueryResult, QueryEngineError> {
-        let tbl_info = self.catalog.create_tbl(name, Schema::new(&columns))?;
+        let table_name = name.clone();
+        self.catalog.create_tbl(name, Schema::new(&columns))?;
+
+        if !primary_key_col_idxs.is_empty() {
+            let index_name = format!("{table_name}_pk");
+            let key_attrs = primary_key_col_idxs;
+            let key_columns = key_attrs
+                .iter()
+                .map(|idx| columns[*idx].clone())
+                .collect::<Vec<_>>();
+            let key_schema = Schema::new(&key_columns);
+            let key_size = key_columns
+                .iter()
+                .map(|column| column.declared_size())
+                .sum::<usize>();
+
+            self.catalog.create_index(
+                index_name, table_name, key_schema, key_attrs, key_size, true,
+            )?;
+        }
 
         Ok(QueryResult::Command {
             tag: String::from("CREATE TABLE"),

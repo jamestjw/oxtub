@@ -191,12 +191,12 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
             return Err(BinderError::CreateTableWithoutColumns);
         }
 
-        validate_primary_key(&stmt.primary_key, &columns)?;
+        let primary_key_col_idxs = resolve_primary_key_col_idxs(&stmt.primary_key, &columns)?;
 
         Ok(BoundStatement::CreateTable(BoundCreateTable {
             name: stmt.table_name,
             columns,
-            primary_key_cols: stmt.primary_key,
+            primary_key_col_idxs,
         }))
     }
 
@@ -385,12 +385,12 @@ fn bind_create_column(column: CreateColumn) -> Column {
     }
 }
 
-fn validate_primary_key(primary_key: &[String], columns: &[Column]) -> Result<(), BinderError> {
-    let column_names = columns
-        .iter()
-        .map(|column| column.name().to_lowercase())
-        .collect::<HashSet<_>>();
+fn resolve_primary_key_col_idxs(
+    primary_key: &[String],
+    columns: &[Column],
+) -> Result<Vec<usize>, BinderError> {
     let mut seen_primary_key_cols = HashSet::new();
+    let mut primary_key_col_idxs = Vec::with_capacity(primary_key.len());
 
     for primary_key_col in primary_key {
         let primary_key_col_key = primary_key_col.to_lowercase();
@@ -401,14 +401,19 @@ fn validate_primary_key(primary_key: &[String], columns: &[Column]) -> Result<()
             ));
         }
 
-        if !column_names.contains(&primary_key_col_key) {
+        let Some(col_idx) = columns
+            .iter()
+            .position(|column| column.name().to_lowercase() == primary_key_col_key)
+        else {
             return Err(BinderError::PrimaryKeyColumnNotFound(
                 primary_key_col.clone(),
             ));
-        }
+        };
+
+        primary_key_col_idxs.push(col_idx);
     }
 
-    Ok(())
+    Ok(primary_key_col_idxs)
 }
 
 #[cfg(test)]
@@ -480,7 +485,7 @@ mod tests {
                         ),
                     },
                 ],
-                primary_key_cols: [],
+                primary_key_col_idxs: [],
             }"#]]
         .assert_eq(&format!("{create_table:#?}"));
     }
@@ -521,9 +526,9 @@ mod tests {
                         ),
                     },
                 ],
-                primary_key_cols: [
-                    "tenant_id",
-                    "id",
+                primary_key_col_idxs: [
+                    0,
+                    1,
                 ],
             }"#]]
         .assert_eq(&format!("{create_table:#?}"));

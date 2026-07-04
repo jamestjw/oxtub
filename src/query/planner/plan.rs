@@ -109,7 +109,7 @@ pub struct InsertPlan {
 pub struct CreateTablePlan {
     pub name: String,
     pub columns: Vec<Column>,
-    pub primary_key_cols: Vec<String>,
+    pub primary_key_col_idxs: Vec<usize>,
 }
 
 #[derive(Debug)]
