@@ -16,8 +16,8 @@ use crate::{
         error::QueryError,
         expression::{BinaryOperator, Expression, UnaryOperator},
         statement::{
-            CreateColumn, CreateTableStatement, DeleteStatement, InsertStatement, SelectItem,
-            SelectStatement, Statement, UpdateStatement,
+            CreateColumn, CreateTableStatement, DeleteStatement, InsertSource, InsertStatement,
+            SelectItem, SelectStatement, Statement, UpdateStatement,
         },
     },
     types::value::Value,
@@ -46,6 +46,10 @@ fn convert_statement(statement: SqlStatement) -> Result<Statement, QueryError> {
 }
 
 fn convert_query(query: Query) -> Result<Statement, QueryError> {
+    Ok(Statement::Select(convert_query_to_select(query)?))
+}
+
+fn convert_query_to_select(query: Query) -> Result<SelectStatement, QueryError> {
     match *query.body {
         SetExpr::Select(select) => convert_select(*select),
         _ => Err(QueryError::UnsupportedQuery(
@@ -54,7 +58,7 @@ fn convert_query(query: Query) -> Result<Statement, QueryError> {
     }
 }
 
-fn convert_select(select: Select) -> Result<Statement, QueryError> {
+fn convert_select(select: Select) -> Result<SelectStatement, QueryError> {
     let [table] = select.from.as_slice() else {
         return Err(QueryError::UnsupportedQuery(
             "only one FROM table group is supported",
@@ -80,31 +84,34 @@ fn convert_select(select: Select) -> Result<Statement, QueryError> {
         .collect::<Result<Vec<_>, _>>()?;
     let where_clause = select.selection.map(convert_expr).transpose()?;
 
-    Ok(Statement::Select(SelectStatement {
+    Ok(SelectStatement {
         table_name: object_name_to_string(name),
         projection,
         where_clause,
-    }))
+    })
 }
 
 fn convert_insert(insert: sqlparser::ast::Insert) -> Result<Statement, QueryError> {
-    let source = insert.source.ok_or(QueryError::UnsupportedStatement(
-        "INSERT must use a VALUES source",
-    ))?;
-    let rows = match *source.body {
-        SetExpr::Values(values) => values
-            .rows
-            .into_iter()
-            .map(|row| {
-                row.content
-                    .into_iter()
-                    .map(convert_expr)
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+    let source = insert
+        .source
+        .ok_or(QueryError::UnsupportedStatement("INSERT must use a source"))?;
+    let source = match *source.body {
+        SetExpr::Values(values) => InsertSource::Values(
+            values
+                .rows
+                .into_iter()
+                .map(|row| {
+                    row.content
+                        .into_iter()
+                        .map(convert_expr)
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        SetExpr::Select(select) => InsertSource::Select(convert_select(*select)?),
         _ => {
             return Err(QueryError::UnsupportedStatement(
-                "only VALUES inserts are supported",
+                "only VALUES and SELECT inserts are supported",
             ));
         }
     };
@@ -118,7 +125,7 @@ fn convert_insert(insert: sqlparser::ast::Insert) -> Result<Statement, QueryErro
     Ok(Statement::Insert(InsertStatement {
         table_name: object_name_to_string(table_name),
         columns: non_empty_object_names(insert.columns),
-        values: rows,
+        source,
     }))
 }
 
@@ -550,20 +557,22 @@ mod tests {
                 InsertStatement {
                     table_name: "users",
                     columns: None,
-                    values: [
+                    source: Values(
                         [
-                            Literal(
-                                Integer(
-                                    1,
+                            [
+                                Literal(
+                                    Integer(
+                                        1,
+                                    ),
                                 ),
-                            ),
-                            Literal(
-                                Varchar(
-                                    "alice",
+                                Literal(
+                                    Varchar(
+                                        "alice",
+                                    ),
                                 ),
-                            ),
+                            ],
                         ],
-                    ],
+                    ),
                 },
             )"#]]
         .assert_eq(&format!("{statement:#?}"));
@@ -575,32 +584,34 @@ mod tests {
                 InsertStatement {
                     table_name: "users",
                     columns: None,
-                    values: [
+                    source: Values(
                         [
-                            Literal(
-                                Integer(
-                                    1,
+                            [
+                                Literal(
+                                    Integer(
+                                        1,
+                                    ),
                                 ),
-                            ),
-                            Literal(
-                                Varchar(
-                                    "alice",
+                                Literal(
+                                    Varchar(
+                                        "alice",
+                                    ),
                                 ),
-                            ),
+                            ],
+                            [
+                                Literal(
+                                    Integer(
+                                        2,
+                                    ),
+                                ),
+                                Literal(
+                                    Varchar(
+                                        "bob",
+                                    ),
+                                ),
+                            ],
                         ],
-                        [
-                            Literal(
-                                Integer(
-                                    2,
-                                ),
-                            ),
-                            Literal(
-                                Varchar(
-                                    "bob",
-                                ),
-                            ),
-                        ],
-                    ],
+                    ),
                 },
             )"#]]
         .assert_eq(&format!("{statement:#?}"));
@@ -621,32 +632,57 @@ mod tests {
                             "name",
                         ],
                     ),
-                    values: [
+                    source: Values(
                         [
-                            Literal(
-                                Integer(
-                                    1,
+                            [
+                                Literal(
+                                    Integer(
+                                        1,
+                                    ),
                                 ),
-                            ),
-                            Literal(
-                                Varchar(
-                                    "alice",
+                                Literal(
+                                    Varchar(
+                                        "alice",
+                                    ),
                                 ),
-                            ),
+                            ],
+                            [
+                                Literal(
+                                    Integer(
+                                        2,
+                                    ),
+                                ),
+                                Literal(
+                                    Varchar(
+                                        "bob",
+                                    ),
+                                ),
+                            ],
                         ],
-                        [
-                            Literal(
-                                Integer(
-                                    2,
-                                ),
-                            ),
-                            Literal(
-                                Varchar(
-                                    "bob",
-                                ),
-                            ),
-                        ],
-                    ],
+                    ),
+                },
+            )"#]]
+        .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn parses_insert_select() {
+        let statement = parse_sql("insert into t2 select * from t1").unwrap();
+
+        expect![[r#"
+            Insert(
+                InsertStatement {
+                    table_name: "t2",
+                    columns: None,
+                    source: Select(
+                        SelectStatement {
+                            table_name: "t1",
+                            projection: [
+                                Wildcard,
+                            ],
+                            where_clause: None,
+                        },
+                    ),
                 },
             )"#]]
         .assert_eq(&format!("{statement:#?}"));

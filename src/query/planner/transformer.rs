@@ -3,7 +3,10 @@ use crate::{
     query::{
         binder::{
             expression::{BoundExpression, ColumnRef},
-            statement::{BoundDelete, BoundInsert, BoundSelect, BoundStatement, BoundUpdate},
+            statement::{
+                BoundDelete, BoundInsert, BoundInsertSource, BoundSelect, BoundStatement,
+                BoundUpdate,
+            },
             table_ref::{BoundExpressionListRef, TableRef},
         },
         expression::{BinaryOperator, UnaryOperator},
@@ -159,10 +162,13 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
     }
 
     fn plan_insert(&self, stmt: BoundInsert) -> Result<PlanNode, PlannerError> {
-        let planned_expr_list = self.plan_bound_expression_list(stmt.bound_exprs)?;
+        let child = match stmt.source {
+            BoundInsertSource::Values(values) => self.plan_bound_expression_list(values)?,
+            BoundInsertSource::Select(select) => self.plan_select(select)?,
+        };
         let insert_columns = stmt.columns;
         let table_schema = stmt.table.schema();
-        let child_schema = planned_expr_list.output_schema();
+        let child_schema = child.output_schema();
 
         if insert_columns.len() != child_schema.columns().len() {
             return Err(PlannerError::InsertSchemaMismatch);
@@ -208,7 +214,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                 table_oid: stmt.table.tbl_oid(),
                 table_schema: stmt.table.schema().clone(),
                 target_col_idxs,
-                child: Box::new(planned_expr_list),
+                child: Box::new(child),
             }),
         })
     }

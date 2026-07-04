@@ -138,12 +138,16 @@ mod tests {
     }
 
     fn create_users_table(catalog: &mut Catalog<'_>) {
+        create_table(catalog, "users");
+    }
+
+    fn create_table(catalog: &mut Catalog<'_>, name: &str) {
         let schema = Schema::new(&[
             Column::new_static("id".to_string(), SqlType::Integer),
             Column::new_variable("name".to_string(), SqlType::Varchar, 32),
         ]);
 
-        catalog.create_tbl("users".to_string(), schema).unwrap();
+        catalog.create_tbl(name.to_string(), schema).unwrap();
     }
 
     fn execute_sql(catalog: &Catalog<'_>, sql: &str) -> ExecutionResult {
@@ -202,6 +206,38 @@ mod tests {
                 rid: None,
                 values: vec![Value::Integer(1), Value::Varchar("alice".to_string())],
             }]
+        );
+    }
+
+    #[test]
+    fn inserts_rows_from_select() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_table(&mut catalog, "t1");
+        create_table(&mut catalog, "t2");
+
+        execute_sql(
+            &catalog,
+            "insert into t1 (id, name) values (1, 'alice'), (2, 'bob')",
+        );
+        let result = execute_sql(&catalog, "insert into t2 select * from t1");
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].values, vec![Value::Integer(2)]);
+
+        let result = execute_sql(&catalog, "select id, name from t2");
+        assert_eq!(
+            result.rows,
+            vec![
+                ExecutorRow {
+                    rid: None,
+                    values: vec![Value::Integer(1), Value::Varchar("alice".to_string())],
+                },
+                ExecutorRow {
+                    rid: None,
+                    values: vec![Value::Integer(2), Value::Varchar("bob".to_string())],
+                },
+            ]
         );
     }
 }

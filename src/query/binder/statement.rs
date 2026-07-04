@@ -30,7 +30,13 @@ pub struct BoundSelect {
 pub struct BoundInsert {
     pub table: BoundBaseTableRef,
     pub columns: Vec<ColumnRef>,
-    pub bound_exprs: BoundExpressionListRef,
+    pub source: BoundInsertSource,
+}
+
+#[derive(Debug)]
+pub enum BoundInsertSource {
+    Values(BoundExpressionListRef),
+    Select(BoundSelect),
 }
 
 #[derive(Debug)]

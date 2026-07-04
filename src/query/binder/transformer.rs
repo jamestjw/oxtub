@@ -7,15 +7,15 @@ use crate::{
             error::BinderError,
             expression::{BoundExpression, ColumnRef, are_column_refs_unique},
             statement::{
-                BoundCreateTable, BoundDelete, BoundInsert, BoundSelect, BoundStatement,
-                BoundUpdate,
+                BoundCreateTable, BoundDelete, BoundInsert, BoundInsertSource, BoundSelect,
+                BoundStatement, BoundUpdate,
             },
             table_ref::{BoundBaseTableRef, BoundExpressionListRef, TableRef},
         },
         expression::Expression,
         statement::{
-            CreateColumn, CreateTableStatement, DeleteStatement, InsertStatement, SelectItem,
-            SelectStatement, Statement, UpdateStatement,
+            CreateColumn, CreateTableStatement, DeleteStatement, InsertSource, InsertStatement,
+            SelectItem, SelectStatement, Statement, UpdateStatement,
         },
     },
 };
@@ -222,10 +222,17 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
         };
 
         let num_columns = columns.len();
+        let source = match stmt.source {
+            InsertSource::Values(values) => {
+                BoundInsertSource::Values(self.bind_values_list(num_columns, values)?)
+            }
+            InsertSource::Select(select) => BoundInsertSource::Select(self.bind_select(select)?),
+        };
+
         Ok(BoundStatement::Insert(BoundInsert {
             table,
             columns,
-            bound_exprs: self.bind_values_list(num_columns, stmt.values)?,
+            source,
         }))
     }
 
@@ -589,35 +596,37 @@ mod tests {
                         column: "name",
                     },
                 ],
-                bound_exprs: BoundExpressionListRef {
-                    identifier: "<unnamed>",
-                    values: [
-                        [
-                            Literal(
-                                Integer(
-                                    1,
+                source: Values(
+                    BoundExpressionListRef {
+                        identifier: "<unnamed>",
+                        values: [
+                            [
+                                Literal(
+                                    Integer(
+                                        1,
+                                    ),
                                 ),
-                            ),
-                            Literal(
-                                Varchar(
-                                    "alice",
+                                Literal(
+                                    Varchar(
+                                        "alice",
+                                    ),
                                 ),
-                            ),
+                            ],
+                            [
+                                Literal(
+                                    Integer(
+                                        2,
+                                    ),
+                                ),
+                                Literal(
+                                    Varchar(
+                                        "bob",
+                                    ),
+                                ),
+                            ],
                         ],
-                        [
-                            Literal(
-                                Integer(
-                                    2,
-                                ),
-                            ),
-                            Literal(
-                                Varchar(
-                                    "bob",
-                                ),
-                            ),
-                        ],
-                    ],
-                },
+                    },
+                ),
             }"#]]
         .assert_eq(&format!("{insert:#?}"));
     }
@@ -1070,23 +1079,25 @@ mod tests {
                         column: "name",
                     },
                 ],
-                bound_exprs: BoundExpressionListRef {
-                    identifier: "<unnamed>",
-                    values: [
-                        [
-                            Literal(
-                                Integer(
-                                    1,
+                source: Values(
+                    BoundExpressionListRef {
+                        identifier: "<unnamed>",
+                        values: [
+                            [
+                                Literal(
+                                    Integer(
+                                        1,
+                                    ),
                                 ),
-                            ),
-                            Literal(
-                                Varchar(
-                                    "alice",
+                                Literal(
+                                    Varchar(
+                                        "alice",
+                                    ),
                                 ),
-                            ),
+                            ],
                         ],
-                    ],
-                },
+                    },
+                ),
             }"#]]
         .assert_eq(&format!("{insert:#?}"));
     }

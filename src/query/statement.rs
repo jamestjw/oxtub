@@ -26,7 +26,13 @@ pub enum SelectItem {
 pub struct InsertStatement {
     pub table_name: String,
     pub columns: Option<Vec<String>>,
-    pub values: Vec<Vec<Expression>>,
+    pub source: InsertSource,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum InsertSource {
+    Values(Vec<Vec<Expression>>),
+    Select(SelectStatement),
 }
 
 #[derive(Debug, Clone, PartialEq)]
