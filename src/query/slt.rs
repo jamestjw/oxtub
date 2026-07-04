@@ -5,6 +5,7 @@ use crate::{
     catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
     query::{
         binder::transformer::Binder,
+        engine::{QueryEngine, QueryResult},
         executor::{ExecutionEngine, engine::ExecutionResult},
         parser::parse_sql,
         planner::transformer::Planner,
@@ -17,10 +18,15 @@ use crate::{
 };
 
 #[derive(Debug)]
-struct QueryRecord {
-    rowsort: bool,
-    sql: String,
-    expected: String,
+enum SltRecord {
+    Query {
+        rowsort: bool,
+        sql: String,
+        expected: String,
+    },
+    StatementOk {
+        sql: String,
+    },
 }
 
 fn setup_bpm(pool_size: usize) -> BufferPoolManager {
@@ -102,7 +108,7 @@ fn format_value(value: &Value) -> String {
     }
 }
 
-fn parse_slt(script: &str) -> Vec<QueryRecord> {
+fn parse_slt(script: &str) -> Vec<SltRecord> {
     // SQLLogicTest is line-oriented: a record starts with a header like
     // `query` or `query rowsort`, SQL follows until `----`, then expected
     // output follows until a blank line.
@@ -118,42 +124,52 @@ fn parse_slt(script: &str) -> Vec<QueryRecord> {
             continue;
         }
 
-        // This minimal harness only supports query records for the seqscan SLT.
-        // statement ok/error can be added when we port DML tests.
         let tokens = line.split_whitespace().collect::<Vec<_>>();
-        assert_eq!(tokens[0], "query", "only query records are supported");
-        let rowsort = tokens.get(1).is_some_and(|token| *token == "rowsort");
         idx += 1;
 
-        // SQL may span multiple lines. The `----` marker separates SQL from
-        // the expected result block.
-        let mut sql = String::new();
-        while idx < lines.len() && lines[idx] != "----" {
-            if !sql.is_empty() {
-                sql.push('\n');
-            }
-            sql.push_str(lines[idx]);
-            idx += 1;
-        }
-        assert!(idx < lines.len(), "query record missing result separator");
-        idx += 1;
+        match tokens.as_slice() {
+            ["query"] | ["query", "rowsort"] => {
+                let rowsort = tokens.get(1).is_some_and(|token| *token == "rowsort");
+                let mut sql = String::new();
+                while idx < lines.len() && lines[idx] != "----" {
+                    if !sql.is_empty() {
+                        sql.push('\n');
+                    }
+                    sql.push_str(lines[idx]);
+                    idx += 1;
+                }
+                assert!(idx < lines.len(), "query record missing result separator");
+                idx += 1;
 
-        // Expected output is stored exactly as row strings until the blank line
-        // that terminates this record.
-        let mut expected = String::new();
-        while idx < lines.len() && !lines[idx].is_empty() {
-            if !expected.is_empty() {
-                expected.push('\n');
-            }
-            expected.push_str(lines[idx].trim_end());
-            idx += 1;
-        }
+                let mut expected = String::new();
+                while idx < lines.len() && !lines[idx].is_empty() {
+                    if !expected.is_empty() {
+                        expected.push('\n');
+                    }
+                    expected.push_str(lines[idx].trim_end());
+                    idx += 1;
+                }
 
-        records.push(QueryRecord {
-            rowsort,
-            sql,
-            expected,
-        });
+                records.push(SltRecord::Query {
+                    rowsort,
+                    sql,
+                    expected,
+                });
+            }
+            ["statement", "ok"] => {
+                let mut sql = String::new();
+                while idx < lines.len() && !lines[idx].is_empty() {
+                    if !sql.is_empty() {
+                        sql.push('\n');
+                    }
+                    sql.push_str(lines[idx]);
+                    idx += 1;
+                }
+
+                records.push(SltRecord::StatementOk { sql });
+            }
+            _ => panic!("unsupported SLT record header: {line}"),
+        }
     }
 
     records
@@ -176,12 +192,54 @@ fn seqscan_slt() {
     let records = parse_slt(include_str!("../../test/sql/01-seqscan.slt"));
 
     for record in records {
-        let actual = format_result(&execute_sql(&catalog, &record.sql));
+        let SltRecord::Query {
+            rowsort,
+            sql,
+            expected,
+        } = record
+        else {
+            panic!("seqscan SLT only supports query records");
+        };
+        let actual = format_result(&execute_sql(&catalog, &sql));
         assert_eq!(
-            normalize_result(record.expected, record.rowsort),
-            normalize_result(actual, record.rowsort),
+            normalize_result(expected, rowsort),
+            normalize_result(actual, rowsort),
             "query failed:\n{}",
-            record.sql
+            sql
         );
+    }
+}
+
+#[test]
+fn insert_slt() {
+    let bpm = setup_bpm(10);
+    let mut catalog = setup_seqscan_catalog(&bpm);
+    let records = parse_slt(include_str!("../../test/sql/02-insert.slt"));
+    let mut engine = QueryEngine::new(&mut catalog);
+
+    for record in records {
+        match record {
+            SltRecord::Query {
+                rowsort,
+                sql,
+                expected,
+            } => {
+                let QueryResult::Rows(result) = engine.execute_sql(&sql).unwrap() else {
+                    panic!("query record did not return rows:\n{sql}");
+                };
+                let actual = format_result(&result);
+                assert_eq!(
+                    normalize_result(expected, rowsort),
+                    normalize_result(actual, rowsort),
+                    "query failed:\n{}",
+                    sql
+                );
+            }
+            SltRecord::StatementOk { sql } => {
+                let QueryResult::Command { .. } = engine.execute_sql(&sql).unwrap() else {
+                    panic!("statement ok record did not return a command result:\n{sql}");
+                };
+            }
+        }
     }
 }
