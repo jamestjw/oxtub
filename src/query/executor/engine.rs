@@ -116,3 +116,92 @@ impl<'catalog, 'bpm> ExecutionEngine<'catalog, 'bpm> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::NamedTempFile;
+
+    use crate::{
+        buffer::bpm::BufferPoolManager,
+        catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
+        query::{binder::transformer::Binder, parser::parse_sql, planner::transformer::Planner},
+        storage::disk::disk_manager::DiskManager,
+        types::value::Value,
+    };
+
+    use super::*;
+
+    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
+        BufferPoolManager::new(pool_size, disk_manager)
+    }
+
+    fn create_users_table(catalog: &mut Catalog<'_>) {
+        let schema = Schema::new(&[
+            Column::new_static("id".to_string(), SqlType::Integer),
+            Column::new_variable("name".to_string(), SqlType::Varchar, 32),
+        ]);
+
+        catalog.create_tbl("users".to_string(), schema).unwrap();
+    }
+
+    fn execute_sql(catalog: &Catalog<'_>, sql: &str) -> ExecutionResult {
+        let statement = parse_sql(sql).unwrap();
+        let binder = Binder::new(catalog);
+        let bound = binder.bind_statement(statement).unwrap();
+        let planner = Planner::new(catalog);
+        let plan = planner.plan_statement(bound).unwrap();
+        let engine = ExecutionEngine::new(catalog);
+
+        engine.execute(plan, 2).unwrap()
+    }
+
+    #[test]
+    fn inserts_values_and_returns_count() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        let result = execute_sql(
+            &catalog,
+            "insert into users (id, name) values (1, 'alice'), (2, 'bob')",
+        );
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].values, vec![Value::Integer(2)]);
+
+        let result = execute_sql(&catalog, "select id, name from users");
+        assert_eq!(
+            result.rows,
+            vec![
+                ExecutorRow {
+                    rid: None,
+                    values: vec![Value::Integer(1), Value::Varchar("alice".to_string())],
+                },
+                ExecutorRow {
+                    rid: None,
+                    values: vec![Value::Integer(2), Value::Varchar("bob".to_string())],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn inserts_values_using_target_column_order() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        execute_sql(&catalog, "insert into users (name, id) values ('alice', 1)");
+
+        let result = execute_sql(&catalog, "select id, name from users");
+        assert_eq!(
+            result.rows,
+            vec![ExecutorRow {
+                rid: None,
+                values: vec![Value::Integer(1), Value::Varchar("alice".to_string())],
+            }]
+        );
+    }
+}

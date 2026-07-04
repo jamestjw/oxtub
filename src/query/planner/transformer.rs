@@ -168,17 +168,20 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             return Err(PlannerError::InsertSchemaMismatch);
         }
 
+        let mut target_col_idxs = Vec::with_capacity(insert_columns.len());
+
         for (insert_col, child_col) in insert_columns.iter().zip(child_schema.columns()) {
             let insert_col_name = match insert_col {
                 ColumnRef::Unqualified { column } => column,
                 ColumnRef::TableQualified { column, .. } => column,
             };
 
-            let target_col = table_schema
+            let target_col_idx = table_schema
                 .columns()
                 .iter()
-                .find(|col| col.name() == insert_col_name)
+                .position(|col| col.name() == insert_col_name)
                 .expect("binder should have resolved insert columns");
+            let target_col = &table_schema.columns()[target_col_idx];
 
             if target_col.sql_type() != child_col.sql_type() {
                 return Err(PlannerError::InsertSchemaMismatch);
@@ -188,6 +191,8 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             {
                 return Err(PlannerError::InsertSchemaMismatch);
             }
+
+            target_col_idxs.push(target_col_idx);
         }
 
         // Output of the insert statement is the number of rows inserted
@@ -202,7 +207,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                 table_name: stmt.table.tbl_name().to_string(),
                 table_oid: stmt.table.tbl_oid(),
                 table_schema: stmt.table.schema().clone(),
-                columns: insert_columns,
+                target_col_idxs,
                 child: Box::new(planned_expr_list),
             }),
         })
@@ -834,15 +839,9 @@ mod tests {
                                 1,
                             ],
                         },
-                        columns: [
-                            TableQualified {
-                                table: "users",
-                                column: "id",
-                            },
-                            TableQualified {
-                                table: "users",
-                                column: "name",
-                            },
+                        target_col_idxs: [
+                            0,
+                            1,
                         ],
                         child: PlanNode {
                             output_schema: Schema {

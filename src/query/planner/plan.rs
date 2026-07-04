@@ -1,9 +1,6 @@
 use crate::{
     catalog::{column::Column, schema::Schema, table::TableId},
-    query::{
-        binder::{expression::ColumnRef, table_ref::BoundBaseTableRef},
-        planner::expression::PlannedExpression,
-    },
+    query::{binder::table_ref::BoundBaseTableRef, planner::expression::PlannedExpression},
 };
 
 #[derive(Debug)]
@@ -101,7 +98,7 @@ pub struct InsertPlan {
     pub table_name: String,
     pub table_oid: TableId,
     pub table_schema: Schema,
-    pub columns: Vec<ColumnRef>,
+    pub target_col_idxs: Vec<usize>,
     pub child: Box<PlanNode>,
 }
 
