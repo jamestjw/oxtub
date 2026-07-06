@@ -41,7 +41,7 @@ impl<'a, const N: usize> Index for BTreeIndex<'a, N> {
         &self.metadata
     }
 
-    fn insert_entry(&mut self, key: &Tuple, rid: Rid) -> Result<(), IndexError> {
+    fn insert_entry(&self, key: &Tuple, rid: Rid) -> Result<(), IndexError> {
         let key = (self.key_encoder)(key, &self.metadata.key_schema);
         match self.tree.insert(key, rid) {
             Ok(_) => Ok(()),
@@ -51,7 +51,7 @@ impl<'a, const N: usize> Index for BTreeIndex<'a, N> {
         }
     }
 
-    fn scan_key(&mut self, key: &Tuple) -> Result<Vec<Rid>, IndexError> {
+    fn scan_key(&self, key: &Tuple) -> Result<Vec<Rid>, IndexError> {
         let key = (self.key_encoder)(key, &self.metadata.key_schema);
         match self.tree.get_values(&key) {
             Ok(r) => Ok(r),
@@ -61,7 +61,7 @@ impl<'a, const N: usize> Index for BTreeIndex<'a, N> {
     }
 
     fn delete_entry(
-        &mut self,
+        &self,
         key: &crate::storage::table::tuple::Tuple,
         rid: crate::storage::rid::Rid,
     ) -> Result<(), super::error::IndexError> {

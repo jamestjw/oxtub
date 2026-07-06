@@ -21,6 +21,13 @@ impl TupleMeta {
     pub fn is_deleted(&self) -> bool {
         self.is_deleted != 0
     }
+
+    pub fn delete(&self) -> Self {
+        Self {
+            is_deleted: 1,
+            ..*self
+        }
+    }
 }
 
 pub(crate) struct NullBitmap<'a> {

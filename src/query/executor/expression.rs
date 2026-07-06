@@ -1,5 +1,5 @@
 use crate::{
-    catalog::types::SqlType,
+    catalog::{schema::Schema, types::SqlType},
     query::{
         executor::{engine::ExecutorRow, error::ExecutionError},
         planner::expression::{
@@ -8,6 +8,7 @@ use crate::{
             NullCheckExpression, NullCheckType, PlannedExpression, PlannedExpressionKind,
         },
     },
+    storage::table::tuple::Tuple,
     types::value::Value,
 };
 
@@ -97,6 +98,19 @@ pub fn evaluate_expression(
             (NullCheckType::IsNotNull, _) => Ok(Value::Boolean(true)),
         },
     }
+}
+
+pub fn evaluate_expression_on_tuple(
+    expr: &PlannedExpression,
+    tuple: &Tuple,
+    schema: &Schema,
+) -> Result<Value, ExecutionError> {
+    let row = ExecutorRow {
+        rid: None,
+        values: tuple.get_values(schema),
+    };
+
+    evaluate_expression(expr, &row)
 }
 
 enum CmpBool {

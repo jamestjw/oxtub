@@ -15,7 +15,7 @@ pub struct IndexMetadata {
 
 pub trait Index {
     fn metadata(&self) -> &IndexMetadata;
-    fn insert_entry(&mut self, key: &Tuple, rid: Rid) -> Result<(), IndexError>;
-    fn delete_entry(&mut self, key: &Tuple, rid: Rid) -> Result<(), IndexError>;
-    fn scan_key(&mut self, key: &Tuple) -> Result<Vec<Rid>, IndexError>;
+    fn insert_entry(&self, key: &Tuple, rid: Rid) -> Result<(), IndexError>;
+    fn delete_entry(&self, key: &Tuple, rid: Rid) -> Result<(), IndexError>;
+    fn scan_key(&self, key: &Tuple) -> Result<Vec<Rid>, IndexError>;
 }

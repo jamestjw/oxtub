@@ -6,7 +6,7 @@ pub struct IndexInfo<'a> {
     // size of the key in bytes
     key_size: usize,
     index_oid: IndexId,
-    index: Box<dyn Index + 'a>,
+    pub(crate) index: Box<dyn Index + 'a>,
 }
 
 impl<'a> IndexInfo<'a> {

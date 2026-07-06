@@ -9,6 +9,7 @@ use crate::{
             insert::InsertExecutor,
             projection::ProjectionExecutor,
             seq_scan::SeqScanExecutor,
+            update::UpdateExecutor,
             values::ValuesExecutor,
         },
         planner::plan::{PlanNode, PlanNodeKind},
@@ -110,9 +111,16 @@ impl<'catalog, 'bpm> ExecutionEngine<'catalog, 'bpm> {
                     child,
                 )))
             }
-            PlanNodeKind::CreateTable(_) | PlanNodeKind::Update(_) => {
-                Err(ExecutionError::UnsupportedPlan)
+            PlanNodeKind::Update(update) => {
+                let child = self.create_executor(&update.child)?;
+                Ok(Box::new(UpdateExecutor::new(
+                    &self.exec_ctx,
+                    update,
+                    plan.output_schema(),
+                    child,
+                )))
             }
+            PlanNodeKind::CreateTable(_) => Err(ExecutionError::UnsupportedPlan),
         }
     }
 }

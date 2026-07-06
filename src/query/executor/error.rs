@@ -1,7 +1,9 @@
 use thiserror::Error;
 
 use crate::{
-    catalog::error::CatalogError, storage::table::error::TableHeapError, types::value::Value,
+    catalog::error::CatalogError,
+    storage::{index::error::IndexError, table::error::TableHeapError},
+    types::value::Value,
 };
 
 #[derive(Debug, Error)]
@@ -11,6 +13,9 @@ pub enum ExecutionError {
 
     #[error("table heap error: {0}")]
     TableHeap(#[from] TableHeapError),
+
+    #[error("index error: {0}")]
+    Index(#[from] IndexError),
 
     #[error("expected boolean expression, got {0:?}")]
     ExpectedBoolean(Value),
