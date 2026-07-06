@@ -4,7 +4,7 @@ pub type TableId = u32;
 
 pub struct TableInfo<'a> {
     pub(crate) schema: Schema,
-    name: String,
+    pub(crate) name: String,
     pub(crate) table_heap: TableHeap<'a>,
     table_oid: TableId,
 }

@@ -216,3 +216,4 @@ macro_rules! slt_test {
 slt_test!(seqscan_slt, "../../test/sql/01-seqscan.slt");
 slt_test!(insert_slt, "../../test/sql/02-insert.slt");
 slt_test!(update_slt, "../../test/sql/03-update.slt");
+slt_test!(delete_slt, "../../test/sql/04-delete.slt");
