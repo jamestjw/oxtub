@@ -243,3 +243,37 @@ fn insert_slt() {
         }
     }
 }
+
+#[test]
+fn update_slt() {
+    let bpm = setup_bpm(10);
+    let mut catalog = setup_seqscan_catalog(&bpm);
+    let records = parse_slt(include_str!("../../test/sql/03-update.slt"));
+    let mut engine = QueryEngine::new(&mut catalog);
+
+    for record in records {
+        match record {
+            SltRecord::Query {
+                rowsort,
+                sql,
+                expected,
+            } => {
+                let QueryResult::Rows(result) = engine.execute_sql(&sql).unwrap() else {
+                    panic!("query record did not return rows:\n{sql}");
+                };
+                let actual = format_result(&result);
+                assert_eq!(
+                    normalize_result(expected, rowsort),
+                    normalize_result(actual, rowsort),
+                    "query failed:\n{}",
+                    sql
+                );
+            }
+            SltRecord::StatementOk { sql } => {
+                let QueryResult::Command { .. } = engine.execute_sql(&sql).unwrap() else {
+                    panic!("statement ok record did not return a command result:\n{sql}");
+                };
+            }
+        }
+    }
+}
