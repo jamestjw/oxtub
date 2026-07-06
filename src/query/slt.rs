@@ -4,11 +4,8 @@ use crate::{
     buffer::bpm::BufferPoolManager,
     catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
     query::{
-        binder::transformer::Binder,
         engine::{QueryEngine, QueryResult},
-        executor::{ExecutionEngine, engine::ExecutionResult},
-        parser::parse_sql,
-        planner::transformer::Planner,
+        executor::engine::ExecutionResult,
     },
     storage::{
         disk::disk_manager::DiskManager,
@@ -68,17 +65,6 @@ fn setup_seqscan_catalog<'bpm>(bpm: &'bpm BufferPoolManager) -> Catalog<'bpm> {
     }
 
     catalog
-}
-
-fn execute_sql(catalog: &Catalog<'_>, sql: &str) -> ExecutionResult {
-    let statement = parse_sql(sql).unwrap();
-    let binder = Binder::new(catalog);
-    let bound = binder.bind_statement(statement).unwrap();
-    let planner = Planner::new(catalog);
-    let plan = planner.plan_statement(bound).unwrap();
-    let engine = ExecutionEngine::new(catalog);
-
-    engine.execute(plan, 128).unwrap()
 }
 
 fn format_result(result: &ExecutionResult) -> String {
@@ -185,38 +171,7 @@ fn normalize_result(result: String, rowsort: bool) -> String {
     rows.join("\n")
 }
 
-#[test]
-fn seqscan_slt() {
-    let bpm = setup_bpm(10);
-    let catalog = setup_seqscan_catalog(&bpm);
-    let records = parse_slt(include_str!("../../test/sql/01-seqscan.slt"));
-
-    for record in records {
-        let SltRecord::Query {
-            rowsort,
-            sql,
-            expected,
-        } = record
-        else {
-            panic!("seqscan SLT only supports query records");
-        };
-        let actual = format_result(&execute_sql(&catalog, &sql));
-        assert_eq!(
-            normalize_result(expected, rowsort),
-            normalize_result(actual, rowsort),
-            "query failed:\n{}",
-            sql
-        );
-    }
-}
-
-#[test]
-fn insert_slt() {
-    let bpm = setup_bpm(10);
-    let mut catalog = setup_seqscan_catalog(&bpm);
-    let records = parse_slt(include_str!("../../test/sql/02-insert.slt"));
-    let mut engine = QueryEngine::new(&mut catalog);
-
+fn run_slt_records(engine: &mut QueryEngine<'_, '_>, records: Vec<SltRecord>) {
     for record in records {
         match record {
             SltRecord::Query {
@@ -244,36 +199,20 @@ fn insert_slt() {
     }
 }
 
-#[test]
-fn update_slt() {
-    let bpm = setup_bpm(10);
-    let mut catalog = setup_seqscan_catalog(&bpm);
-    let records = parse_slt(include_str!("../../test/sql/03-update.slt"));
-    let mut engine = QueryEngine::new(&mut catalog);
+macro_rules! slt_test {
+    ($name:ident, $path:literal) => {
+        #[test]
+        fn $name() {
+            let bpm = setup_bpm(10);
+            let mut catalog = setup_seqscan_catalog(&bpm);
+            let records = parse_slt(include_str!($path));
+            let mut engine = QueryEngine::new(&mut catalog);
 
-    for record in records {
-        match record {
-            SltRecord::Query {
-                rowsort,
-                sql,
-                expected,
-            } => {
-                let QueryResult::Rows(result) = engine.execute_sql(&sql).unwrap() else {
-                    panic!("query record did not return rows:\n{sql}");
-                };
-                let actual = format_result(&result);
-                assert_eq!(
-                    normalize_result(expected, rowsort),
-                    normalize_result(actual, rowsort),
-                    "query failed:\n{}",
-                    sql
-                );
-            }
-            SltRecord::StatementOk { sql } => {
-                let QueryResult::Command { .. } = engine.execute_sql(&sql).unwrap() else {
-                    panic!("statement ok record did not return a command result:\n{sql}");
-                };
-            }
+            run_slt_records(&mut engine, records);
         }
-    }
+    };
 }
+
+slt_test!(seqscan_slt, "../../test/sql/01-seqscan.slt");
+slt_test!(insert_slt, "../../test/sql/02-insert.slt");
+slt_test!(update_slt, "../../test/sql/03-update.slt");
