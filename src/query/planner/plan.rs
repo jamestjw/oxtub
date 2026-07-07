@@ -3,7 +3,7 @@ use crate::{
     query::{binder::table_ref::BoundBaseTableRef, planner::expression::PlannedExpression},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlanNode {
     pub output_schema: Schema,
     pub kind: PlanNodeKind,
@@ -13,9 +13,80 @@ impl PlanNode {
     pub fn output_schema(&self) -> &Schema {
         &self.output_schema
     }
+
+    pub fn clone_with_children(&self, mut children: Vec<PlanNode>) -> Self {
+        let kind = match &self.kind {
+            PlanNodeKind::SeqScan(seq_scan_plan) if children.is_empty() => {
+                PlanNodeKind::SeqScan(seq_scan_plan.clone())
+            }
+            PlanNodeKind::Filter(FilterPlan {
+                predicate,
+                child: _,
+            }) if children.len() == 1 => PlanNodeKind::Filter(FilterPlan {
+                predicate: predicate.clone(),
+                child: Box::new(children.pop().unwrap()),
+            }),
+            PlanNodeKind::Projection(ProjectionPlan {
+                expressions,
+                child: _,
+            }) if children.len() == 1 => PlanNodeKind::Projection(ProjectionPlan {
+                expressions: expressions.clone(),
+                child: Box::new(children.pop().unwrap()),
+            }),
+            PlanNodeKind::Values(values_plan) if children.is_empty() => {
+                PlanNodeKind::Values(values_plan.clone())
+            }
+            PlanNodeKind::Insert(insert_plan) if children.len() == 1 => {
+                PlanNodeKind::Insert(InsertPlan {
+                    table_name: insert_plan.table_name.clone(),
+                    table_oid: insert_plan.table_oid,
+                    table_schema: insert_plan.table_schema.clone(),
+                    target_col_idxs: insert_plan.target_col_idxs.clone(),
+                    child: Box::new(children.pop().unwrap()),
+                })
+            }
+            PlanNodeKind::CreateTable(create_table_plan) if children.is_empty() => {
+                PlanNodeKind::CreateTable(create_table_plan.clone())
+            }
+            PlanNodeKind::Update(update_plan) if children.len() == 1 => {
+                PlanNodeKind::Update(UpdatePlan {
+                    table_name: update_plan.table_name.clone(),
+                    table_oid: update_plan.table_oid,
+                    table_schema: update_plan.table_schema.clone(),
+                    expressions: update_plan.expressions.clone(),
+                    child: Box::new(children.pop().unwrap()),
+                })
+            }
+            PlanNodeKind::Delete(delete_plan) if children.len() == 1 => {
+                PlanNodeKind::Delete(DeletePlan {
+                    table_oid: delete_plan.table_oid,
+                    child: Box::new(children.pop().unwrap()),
+                })
+            }
+            _ => panic!("unexpected shape"),
+        };
+
+        Self {
+            output_schema: self.output_schema.clone(),
+            kind,
+        }
+    }
+
+    pub fn children(&self) -> Vec<&PlanNode> {
+        match &self.kind {
+            PlanNodeKind::SeqScan(_) => vec![],
+            PlanNodeKind::Filter(filter) => vec![filter.child.as_ref()],
+            PlanNodeKind::Projection(projection) => vec![projection.child.as_ref()],
+            PlanNodeKind::Values(_) => vec![],
+            PlanNodeKind::Insert(insert) => vec![insert.child.as_ref()],
+            PlanNodeKind::CreateTable(_) => vec![],
+            PlanNodeKind::Update(update) => vec![update.child.as_ref()],
+            PlanNodeKind::Delete(delete) => vec![delete.child.as_ref()],
+        }
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PlanNodeKind {
     SeqScan(SeqScanPlan),
     Filter(FilterPlan),
@@ -27,7 +98,7 @@ pub enum PlanNodeKind {
     Delete(DeletePlan),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SeqScanPlan {
     pub table_name: String,
     pub table_oid: TableId,
@@ -52,13 +123,13 @@ impl SeqScanPlan {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FilterPlan {
     pub predicate: PlannedExpression,
     pub child: Box<PlanNode>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProjectionPlan {
     pub expressions: Vec<PlannedExpression>,
     pub child: Box<PlanNode>,
@@ -88,12 +159,12 @@ impl ProjectionPlan {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ValuesPlan {
     pub rows: Vec<Vec<PlannedExpression>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InsertPlan {
     pub table_name: String,
     pub table_oid: TableId,
@@ -102,14 +173,14 @@ pub struct InsertPlan {
     pub child: Box<PlanNode>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CreateTablePlan {
     pub name: String,
     pub columns: Vec<Column>,
     pub primary_key_col_idxs: Vec<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UpdatePlan {
     pub table_name: String,
     pub table_oid: TableId,
@@ -118,7 +189,7 @@ pub struct UpdatePlan {
     pub child: Box<PlanNode>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DeletePlan {
     pub table_oid: TableId,
     pub child: Box<PlanNode>,

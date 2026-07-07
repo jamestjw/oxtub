@@ -1,6 +1,6 @@
 use crate::{catalog::column::Column, storage::table::tuple::NullBitmap};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schema {
     // number of bytes occupied by the fix-length part of the tuple
     // refer to src/storage/table/tuple.rs for tuple layout

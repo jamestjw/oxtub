@@ -73,7 +73,7 @@ impl<'catalog, 'bpm> QueryEngine<'catalog, 'bpm> {
             | BoundStatement::Update(_)
             | BoundStatement::Delete(_) => {
                 let plan = Planner::new(self.catalog).plan_statement(bound_statement)?;
-                let plan = Optimizer::new(self.catalog).optimize(plan);
+                let plan = Optimizer::new(self.catalog).optimize(&plan);
                 let execution_engine = ExecutionEngine::new(self.catalog);
 
                 Ok(QueryResult::Rows(

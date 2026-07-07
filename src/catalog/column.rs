@@ -1,6 +1,6 @@
 use crate::{catalog::types::SqlType, storage::table::tuple::VarOffset};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
     name: String,
     sql_type: SqlType,
@@ -9,7 +9,7 @@ pub struct Column {
     size: ColumnSize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ColumnSize {
     Inline(usize),
     Variable(usize),

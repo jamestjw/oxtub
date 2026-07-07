@@ -49,13 +49,13 @@ impl ExpressionType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlannedExpression {
     pub return_type: ExpressionType,
     pub kind: PlannedExpressionKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PlannedExpressionKind {
     ColumnValue(ColumnValueExpression),
     ConstantValue(ConstantValueExpression),
@@ -67,19 +67,19 @@ pub enum PlannedExpressionKind {
     NullCheck(NullCheckExpression),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ColumnValueExpression {
     // which child the column is from
     pub tuple_idx: usize,
     pub col_idx: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConstantValueExpression {
     pub value: Value,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ComparisonType {
     Eq,
     NotEq,
@@ -89,56 +89,56 @@ pub enum ComparisonType {
     GreaterThanOrEqual,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ArithmeticType {
     Plus,
     Minus,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LogicType {
     And,
     Or,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NullCheckType {
     IsNull,
     IsNotNull,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ComparisonExpression {
     pub left: Box<PlannedExpression>,
     pub comparison_type: ComparisonType,
     pub right: Box<PlannedExpression>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ArithmeticExpression {
     pub left: Box<PlannedExpression>,
     pub arithmetic_type: ArithmeticType,
     pub right: Box<PlannedExpression>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LogicExpression {
     pub left: Box<PlannedExpression>,
     pub logic_type: LogicType,
     pub right: Box<PlannedExpression>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NotExpression {
     pub expr: Box<PlannedExpression>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NegateExpression {
     pub expr: Box<PlannedExpression>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NullCheckExpression {
     pub expr: Box<PlannedExpression>,
     pub null_check_type: NullCheckType,
