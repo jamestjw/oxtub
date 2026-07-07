@@ -49,6 +49,10 @@ impl Executor for InsertExecutor<'_, '_, '_, '_> {
         }
 
         let table_info = self.exec_ctx.catalog.get_tbl_by_oid(self.plan.table_oid)?;
+        let indexes = self
+            .exec_ctx
+            .catalog
+            .get_table_indexes(&self.plan.table_name)?;
         let mut inserted_count = 0;
 
         loop {
@@ -73,9 +77,20 @@ impl Executor for InsertExecutor<'_, '_, '_, '_> {
                 }
 
                 let tuple = Tuple::from_values(&values, &self.plan.table_schema);
-                table_info
+                let rid = table_info
                     .table_heap
                     .insert_tuple(&TupleMeta::new(0, false), &tuple)?;
+
+                for index_info in indexes.iter() {
+                    let metadata = index_info.index.metadata();
+                    let key = tuple.key_from_tuple(
+                        &self.plan.table_schema,
+                        &metadata.key_schema,
+                        &metadata.key_attrs,
+                    );
+                    index_info.index.insert_entry(&key, rid)?;
+                }
+
                 inserted_count += 1;
             }
         }

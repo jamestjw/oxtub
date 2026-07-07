@@ -134,6 +134,7 @@ mod tests {
         catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
         query::{binder::transformer::Binder, parser::parse_sql, planner::transformer::Planner},
         storage::disk::disk_manager::DiskManager,
+        storage::table::tuple::Tuple,
         types::value::Value,
     };
 
@@ -147,6 +148,20 @@ mod tests {
 
     fn create_users_table(catalog: &mut Catalog<'_>) {
         create_table(catalog, "users");
+    }
+
+    fn create_users_id_index(catalog: &mut Catalog<'_>) {
+        let key_schema = Schema::new(&[Column::new_static("id".to_string(), SqlType::Integer)]);
+        catalog
+            .create_index(
+                "idx_users_id".to_string(),
+                "users".to_string(),
+                key_schema,
+                vec![0],
+                size_of::<i32>(),
+                false,
+            )
+            .unwrap();
     }
 
     fn create_table(catalog: &mut Catalog<'_>, name: &str) {
@@ -174,6 +189,7 @@ mod tests {
         let bpm = setup_bpm(3);
         let mut catalog = Catalog::new(&bpm);
         create_users_table(&mut catalog);
+        create_users_id_index(&mut catalog);
 
         let result = execute_sql(
             &catalog,
@@ -196,6 +212,23 @@ mod tests {
                     values: vec![Value::Integer(2), Value::Varchar("bob".to_string())],
                 },
             ]
+        );
+
+        let index_info = catalog
+            .get_idx_for_tbl_name("idx_users_id", "users")
+            .unwrap();
+        let key = Tuple::from_values(
+            &[Value::Integer(1)],
+            &index_info.index.metadata().key_schema,
+        );
+        let rids = index_info.index.scan_key(&key).unwrap();
+
+        assert_eq!(rids.len(), 1);
+        let table_info = catalog.get_tbl_by_name("users").unwrap();
+        let (_, tuple) = table_info.table_heap.get_tuple(rids[0]).unwrap();
+        assert_eq!(
+            tuple.get_values(&table_info.schema()),
+            vec![Value::Integer(1), Value::Varchar("alice".to_string())]
         );
     }
 
