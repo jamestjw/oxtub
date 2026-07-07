@@ -10,6 +10,7 @@ use crate::{
         },
         error::QueryError,
         executor::{ExecutionEngine, engine::ExecutionResult, error::ExecutionError},
+        optimizer::Optimizer,
         parser::parse_sql,
         planner::{error::PlannerError, transformer::Planner},
     },
@@ -72,6 +73,7 @@ impl<'catalog, 'bpm> QueryEngine<'catalog, 'bpm> {
             | BoundStatement::Update(_)
             | BoundStatement::Delete(_) => {
                 let plan = Planner::new(self.catalog).plan_statement(bound_statement)?;
+                let plan = Optimizer::new(self.catalog).optimize(plan);
                 let execution_engine = ExecutionEngine::new(self.catalog);
 
                 Ok(QueryResult::Rows(
