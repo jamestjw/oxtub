@@ -2,7 +2,7 @@ use crate::{
     catalog::{index::IndexId, manager::Catalog},
     query::planner::{
         expression::{ColumnValueExpression, PlannedExpression, PlannedExpressionKind},
-        plan::{PlanNode, PlanNodeKind, ProjectionPlan},
+        plan::{FilterPlan, PlanNode, PlanNodeKind, ProjectionPlan, SeqScanPlan},
     },
 };
 
@@ -88,11 +88,45 @@ impl<'catalog, 'bpm> Optimizer<'catalog, 'bpm> {
     }
 
     fn optimize_eliminate_true_filter(&self, plan: &PlanNode) -> PlanNode {
+        // TODO: this eliminates `WHERE true` filters, this probably isn't
+        // very useful until we have constant folding, i.e. optimising
+        // `1 = 1` to `True` and simplifying filters with logical operators
+        // when some expressions are trivially true or false.
         plan.clone()
     }
 
     fn optimize_merge_filter_scan(&self, plan: &PlanNode) -> PlanNode {
-        plan.clone()
+        // merge filter into filter_predicate of seq scan plan node
+        let optimized_children = plan
+            .children()
+            .into_iter()
+            .map(|child| self.optimize_merge_filter_scan(child))
+            .collect::<Vec<_>>();
+        let optimized_plan = plan.clone_with_children(optimized_children);
+
+        match &optimized_plan.kind {
+            PlanNodeKind::Filter(FilterPlan { predicate, child }) => match &child.kind {
+                PlanNodeKind::SeqScan(SeqScanPlan {
+                    table_name,
+                    table_oid,
+                    filter_predicate,
+                }) if filter_predicate.is_none()
+                // the SeqScanPlan produced by the planner should not have a filter predicate so it
+                // should always be true (for now), if it's not the case, we can always use a
+                // conjunction to combine the predicates, though for now this shouldn't open so we
+                // skip it
+                => PlanNode {
+                    output_schema: optimized_plan.output_schema().clone(),
+                    kind: PlanNodeKind::SeqScan(SeqScanPlan {
+                        table_name: table_name.clone(),
+                        table_oid: *table_oid,
+                        filter_predicate: Some(predicate.clone()),
+                    }),
+                },
+                _ => optimized_plan,
+            },
+            _ => optimized_plan,
+        }
     }
 
     fn rewrite_expression_for_join(
@@ -102,10 +136,6 @@ impl<'catalog, 'bpm> Optimizer<'catalog, 'bpm> {
         _right_column_count: usize,
     ) -> PlannedExpression {
         expr
-    }
-
-    fn is_predicate_true(&self, _expr: &PlannedExpression) -> bool {
-        false
     }
 
     fn optimize_order_by_as_index_scan(&self, plan: &PlanNode) -> PlanNode {
@@ -136,6 +166,7 @@ impl<'catalog, 'bpm> Optimizer<'catalog, 'bpm> {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use tempfile::NamedTempFile;
 
     use crate::{
@@ -188,5 +219,88 @@ mod tests {
 
         assert!(matches!(optimized.kind, PlanNodeKind::SeqScan(_)));
         assert_eq!(optimized.output_schema(), plan.output_schema());
+    }
+
+    #[test]
+    fn pushes_filter_predicate_into_seq_scan() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+
+        let plan = plan_sql(&catalog, "select id, name from users where id = 1");
+        let optimized = Optimizer::new(&catalog).optimize(&plan);
+
+        expect![[r#"
+            PlanNode {
+                output_schema: Schema {
+                    inlined_storage_size: 9,
+                    columns: [
+                        Column {
+                            name: "users.id",
+                            sql_type: Integer,
+                            value_offset: 1,
+                            size: Inline(
+                                4,
+                            ),
+                        },
+                        Column {
+                            name: "users.name",
+                            sql_type: Varchar,
+                            value_offset: 5,
+                            size: Variable(
+                                32,
+                            ),
+                        },
+                    ],
+                    uninlined_columns: [
+                        1,
+                    ],
+                },
+                kind: SeqScan(
+                    SeqScanPlan {
+                        table_name: "users",
+                        table_oid: 0,
+                        filter_predicate: Some(
+                            PlannedExpression {
+                                return_type: ExpressionType {
+                                    sql_type: Boolean,
+                                    varchar_size: None,
+                                },
+                                kind: Comparison(
+                                    ComparisonExpression {
+                                        left: PlannedExpression {
+                                            return_type: ExpressionType {
+                                                sql_type: Integer,
+                                                varchar_size: None,
+                                            },
+                                            kind: ColumnValue(
+                                                ColumnValueExpression {
+                                                    tuple_idx: 0,
+                                                    col_idx: 0,
+                                                },
+                                            ),
+                                        },
+                                        comparison_type: Eq,
+                                        right: PlannedExpression {
+                                            return_type: ExpressionType {
+                                                sql_type: Integer,
+                                                varchar_size: None,
+                                            },
+                                            kind: ConstantValue(
+                                                ConstantValueExpression {
+                                                    value: Integer(
+                                                        1,
+                                                    ),
+                                                },
+                                            ),
+                                        },
+                                    },
+                                ),
+                            },
+                        ),
+                    },
+                ),
+            }"#]]
+        .assert_eq(&format!("{optimized:#?}"));
     }
 }

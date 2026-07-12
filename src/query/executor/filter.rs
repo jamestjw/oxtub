@@ -3,12 +3,10 @@ use crate::{
     query::{
         executor::{
             engine::ExecutorRow, error::ExecutionError, executor::Executor,
-            expression::evaluate_expression,
+            expression::filter_keep_row,
         },
-        planner::expression::PlannedExpression,
         planner::plan::FilterPlan,
     },
-    types::value::Value,
 };
 
 pub struct FilterExecutor<'plan> {
@@ -33,14 +31,6 @@ impl<'plan> FilterExecutor<'plan> {
     }
 }
 
-fn keep_row(predicate: &PlannedExpression, row: &ExecutorRow) -> Result<bool, ExecutionError> {
-    match evaluate_expression(predicate, row)? {
-        Value::Boolean(true) => Ok(true),
-        Value::Boolean(false) | Value::Null(_) => Ok(false),
-        value => Err(ExecutionError::ExpectedBoolean(value)),
-    }
-}
-
 impl Executor for FilterExecutor<'_> {
     fn init(&mut self) -> Result<(), ExecutionError> {
         self.child.init()
@@ -52,7 +42,7 @@ impl Executor for FilterExecutor<'_> {
 
         loop {
             while let Some(row) = self.buffered_rows.next() {
-                if keep_row(predicate, &row)? {
+                if filter_keep_row(predicate, &row)? {
                     out.push(row);
 
                     if out.len() == batch_size {
@@ -68,7 +58,7 @@ impl Executor for FilterExecutor<'_> {
 
             self.buffered_rows = batch.into_iter();
             while let Some(row) = self.buffered_rows.next() {
-                if keep_row(predicate, &row)? {
+                if filter_keep_row(predicate, &row)? {
                     out.push(row);
 
                     if out.len() == batch_size {

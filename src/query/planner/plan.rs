@@ -102,6 +102,7 @@ pub enum PlanNodeKind {
 pub struct SeqScanPlan {
     pub table_name: String,
     pub table_oid: TableId,
+    pub filter_predicate: Option<PlannedExpression>,
 }
 
 impl SeqScanPlan {

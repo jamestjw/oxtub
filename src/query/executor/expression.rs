@@ -113,6 +113,17 @@ pub fn evaluate_expression_on_tuple(
     evaluate_expression(expr, &row)
 }
 
+pub fn filter_keep_row(
+    predicate: &PlannedExpression,
+    row: &ExecutorRow,
+) -> Result<bool, ExecutionError> {
+    match evaluate_expression(predicate, row)? {
+        Value::Boolean(true) => Ok(true),
+        Value::Boolean(false) | Value::Null(_) => Ok(false),
+        value => Err(ExecutionError::ExpectedBoolean(value)),
+    }
+}
+
 enum CmpBool {
     True,
     False,

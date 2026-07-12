@@ -5,6 +5,7 @@ use crate::{
             engine::ExecutorRow,
             error::ExecutionError,
             executor::{Executor, ExecutorContext},
+            expression::filter_keep_row,
         },
         planner::plan::SeqScanPlan,
     },
@@ -57,13 +58,18 @@ impl Executor for SeqScanExecutor<'_, '_, '_, '_> {
                 continue;
             }
 
-            // TODO: add a filter predicate to SeqScanPlan for predicate push down
-            // and filter out tuples here
-
-            res.push(ExecutorRow {
+            let row = ExecutorRow {
                 rid: Some(rid),
                 values: tuple.get_values(self.output_schema),
-            });
+            };
+
+            if let Some(filter_predicate) = &self.plan.filter_predicate {
+                if !filter_keep_row(filter_predicate, &row)? {
+                    continue;
+                }
+            }
+
+            res.push(row);
         }
 
         Ok(res)

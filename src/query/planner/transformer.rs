@@ -316,6 +316,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                     kind: PlanNodeKind::SeqScan(SeqScanPlan {
                         table_name: String::from(bound_base_table_ref.tbl_name()),
                         table_oid: tbl_info.table_oid(),
+                        filter_predicate: None,
                     }),
                 })
             }
@@ -715,6 +716,7 @@ mod tests {
                                 SeqScanPlan {
                                     table_name: "users",
                                     table_oid: 0,
+                                    filter_predicate: None,
                                 },
                             ),
                         },
@@ -1057,6 +1059,7 @@ mod tests {
                                 SeqScanPlan {
                                     table_name: "users",
                                     table_oid: 0,
+                                    filter_predicate: None,
                                 },
                             ),
                         },
@@ -1134,6 +1137,7 @@ mod tests {
                                 SeqScanPlan {
                                     table_name: "users",
                                     table_oid: 0,
+                                    filter_predicate: None,
                                 },
                             ),
                         },
