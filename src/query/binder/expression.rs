@@ -7,8 +7,18 @@ use crate::{
 
 #[derive(Debug, PartialEq)]
 pub enum ColumnRef {
-    Unqualified { column: String },
-    TableQualified { table: String, column: String },
+    Unqualified {
+        column: String,
+    },
+    TableQualified {
+        table: String,
+        column: String,
+    },
+    SchemaTableQualified {
+        schema: String,
+        table: String,
+        column: String,
+    },
 }
 
 impl ColumnRef {
@@ -16,6 +26,11 @@ impl ColumnRef {
         match self {
             ColumnRef::Unqualified { column } => column.clone(),
             ColumnRef::TableQualified { table, column } => format!("{table}.{column}"),
+            ColumnRef::SchemaTableQualified {
+                schema,
+                table,
+                column,
+            } => format!("{schema}.{table}.{column}"),
         }
     }
 }
@@ -39,10 +54,7 @@ pub fn are_column_refs_unique(column_refs: &[ColumnRef]) -> bool {
     let mut seen = HashSet::new();
 
     for column_ref in column_refs {
-        let stringified_col = match column_ref {
-            ColumnRef::Unqualified { column } => column.clone(),
-            ColumnRef::TableQualified { table, column } => format!("{table}.{column}"),
-        };
+        let stringified_col = column_ref.to_str();
         if !seen.insert(stringified_col.to_lowercase()) {
             return false;
         }

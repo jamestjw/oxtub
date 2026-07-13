@@ -48,6 +48,10 @@ impl BoundBaseTableRef {
         self.alias.as_ref().unwrap_or(&self.table_name)
     }
 
+    pub fn matches_bound_tbl_name(&self, name: &str) -> bool {
+        self.bound_tbl_name().eq_ignore_ascii_case(name)
+    }
+
     pub fn schema(&self) -> &Schema {
         &self.schema
     }

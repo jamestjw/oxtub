@@ -2,7 +2,7 @@ use crate::types::value::Value;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
-    Column(String),
+    Column(ParsedColumnRef),
     Literal(Value),
     UnaryOp {
         op: UnaryOperator,
@@ -13,6 +13,18 @@ pub enum Expression {
         op: BinaryOperator,
         right: Box<Expression>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ParsedColumnRef {
+    pub qualifier: Option<ColumnQualifier>,
+    pub column: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ColumnQualifier {
+    Table { table: String },
+    SchemaTable { schema: String, table: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

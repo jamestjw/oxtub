@@ -12,10 +12,10 @@ use crate::{
             },
             table_ref::{BoundBaseTableRef, BoundExpressionListRef, TableRef},
         },
-        expression::Expression,
+        expression::{ColumnQualifier, Expression, ParsedColumnRef},
         statement::{
             CreateColumn, CreateTableStatement, DeleteStatement, InsertSource, InsertStatement,
-            SelectItem, SelectStatement, Statement, UpdateStatement,
+            SelectItem, SelectStatement, Statement, TableRef as ParsedTableRef, UpdateStatement,
         },
     },
 };
@@ -112,7 +112,16 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     fn bind_select(&self, stmt: SelectStatement) -> Result<BoundSelect, BinderError> {
         // TODO: should support aliases!
         // TODO: can also select without a From clause
-        let tbl_ref = TableRef::BaseTable(self.bind_base_table_ref(stmt.table_name, None)?);
+        let tbl_ref = match stmt.table {
+            ParsedTableRef::BaseTable { table_name, alias } => {
+                TableRef::BaseTable(self.bind_base_table_ref(table_name, alias)?)
+            }
+            ParsedTableRef::Join { .. } => {
+                return Err(BinderError::UnsupportedExpression(
+                    "joins are not supported by binder yet".into(),
+                ));
+            }
+        };
         let context = BindContext::table_ref_scope(&tbl_ref);
         let projection = self.bind_select_list(stmt.projection, &context)?;
         let where_ = stmt
@@ -309,13 +318,25 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     // todo: when doing the above, handle the case where aliases can cause ambiguity
     fn bind_column_ref(
         &self,
-        column: String,
+        column: ParsedColumnRef,
         context: &BindContext<'_>,
     ) -> Result<ColumnRef, BinderError> {
+        let ParsedColumnRef { qualifier, column } = column;
+
         match context.scope {
-            Some(BindScope::BaseTable(table)) => {
-                Self::resolve_column_ref_from_base_table_ref(table, column)
-            }
+            Some(BindScope::BaseTable(table)) => match qualifier {
+                None => Self::resolve_column_ref_from_base_table_ref(table, column),
+                Some(ColumnQualifier::Table { table: qualifier }) => {
+                    if !table.matches_bound_tbl_name(&qualifier) {
+                        return Err(BinderError::MissingFromClauseEntry(qualifier));
+                    }
+
+                    Self::resolve_column_ref_from_base_table_ref(table, column)
+                }
+                Some(ColumnQualifier::SchemaTable { schema, table }) => Err(
+                    BinderError::MissingFromClauseEntry(format!("{schema}.{table}")),
+                ),
+            },
             Some(BindScope::ExprList(_)) => Err(BinderError::UnsupportedExpression(format!(
                 "column reference `{column}` in expression list scope"
             ))),
@@ -690,6 +711,58 @@ mod tests {
     }
 
     #[test]
+    fn binds_table_qualified_select_columns() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+
+        let statement = parse_sql("select users.id from users").unwrap();
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Select(select) = bound else {
+            panic!("expected select statement");
+        };
+
+        assert_eq!(
+            select.projection,
+            vec![BoundExpression::Column(ColumnRef::TableQualified {
+                table: "users".to_string(),
+                column: "id".to_string(),
+            })]
+        );
+
+        let statement = parse_sql("select u.id from users u").unwrap();
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Select(select) = bound else {
+            panic!("expected select statement");
+        };
+
+        assert_eq!(
+            select.projection,
+            vec![BoundExpression::Column(ColumnRef::TableQualified {
+                table: "u".to_string(),
+                column: "id".to_string(),
+            })]
+        );
+    }
+
+    #[test]
+    fn rejects_table_qualified_columns_without_matching_table_scope() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+
+        let statement = parse_sql("select orders.id from users").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+        assert!(matches!(err, BinderError::MissingFromClauseEntry(table) if table == "orders"));
+
+        let statement = parse_sql("select users.id from users u").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+        assert!(matches!(err, BinderError::MissingFromClauseEntry(table) if table == "users"));
+    }
+
+    #[test]
     fn binds_select_where_clause() {
         let bpm = setup_bpm(3);
         let mut catalog = Catalog::new(&bpm);
@@ -969,7 +1042,10 @@ mod tests {
         create_users_table(&mut catalog);
         let binder = Binder::new(&catalog);
         let statement = Statement::Select(SelectStatement {
-            table_name: "users".to_string(),
+            table: ParsedTableRef::BaseTable {
+                table_name: "users".to_string(),
+                alias: None,
+            },
             projection: vec![],
             where_clause: None,
         });

@@ -1,10 +1,10 @@
 use sqlparser::{
     ast::{
         AssignmentTarget, BinaryOperator as SqlBinaryOperator, CharacterLength, ColumnOption,
-        DataType, Expr as SqlExpr, FromTable, Ident, IndexColumn, ObjectName, Query, Select,
-        SelectItem as SqlSelectItem, SetExpr, Statement as SqlStatement, TableConstraint,
-        TableFactor, TableObject, TableWithJoins, UnaryOperator as SqlUnaryOperator,
-        Value as SqlValue,
+        DataType, Expr as SqlExpr, FromTable, Ident, IndexColumn, Join, JoinConstraint,
+        JoinOperator, ObjectName, Query, Select, SelectItem as SqlSelectItem, SetExpr,
+        Statement as SqlStatement, TableAlias, TableConstraint, TableFactor, TableObject,
+        TableWithJoins, UnaryOperator as SqlUnaryOperator, Value as SqlValue,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -14,10 +14,10 @@ use crate::{
     catalog::types::SqlType,
     query::{
         error::QueryError,
-        expression::{BinaryOperator, Expression, UnaryOperator},
+        expression::{BinaryOperator, ColumnQualifier, Expression, ParsedColumnRef, UnaryOperator},
         statement::{
             CreateColumn, CreateTableStatement, DeleteStatement, InsertSource, InsertStatement,
-            SelectItem, SelectStatement, Statement, UpdateStatement,
+            JoinType, SelectItem, SelectStatement, Statement, TableRef, UpdateStatement,
         },
     },
     types::value::Value,
@@ -59,23 +59,10 @@ fn convert_query_to_select(query: Query) -> Result<SelectStatement, QueryError> 
 }
 
 fn convert_select(select: Select) -> Result<SelectStatement, QueryError> {
-    let [table] = select.from.as_slice() else {
-        return Err(QueryError::UnsupportedQuery(
-            "only one FROM table group is supported",
-        ));
-    };
-
-    if !table.joins.is_empty() {
-        // TODO: support joins within a single TableWithJoins. We can still keep
-        // multiple comma-separated TableWithJoins unsupported for now.
-        return Err(QueryError::UnsupportedQuery("joins are not supported yet"));
-    }
-
-    let TableFactor::Table { name, .. } = &table.relation else {
-        return Err(QueryError::UnsupportedQuery(
-            "FROM source must be a base table",
-        ));
-    };
+    let [table]: [TableWithJoins; 1] = select
+        .from
+        .try_into()
+        .map_err(|_| QueryError::UnsupportedQuery("only one FROM table group is supported"))?;
 
     let projection = select
         .projection
@@ -85,7 +72,7 @@ fn convert_select(select: Select) -> Result<SelectStatement, QueryError> {
     let where_clause = select.selection.map(convert_expr).transpose()?;
 
     Ok(SelectStatement {
-        table_name: object_name_to_string(name),
+        table: convert_table_with_joins(table)?,
         projection,
         where_clause,
     })
@@ -301,8 +288,11 @@ fn convert_select_item(item: SqlSelectItem) -> Result<SelectItem, QueryError> {
 
 fn convert_expr(expr: SqlExpr) -> Result<Expression, QueryError> {
     match expr {
-        // TODO: support table_name.col_name format
-        SqlExpr::Identifier(ident) => Ok(Expression::Column(ident_to_string(&ident))),
+        SqlExpr::Identifier(ident) => Ok(Expression::Column(ParsedColumnRef {
+            qualifier: None,
+            column: ident_to_string(&ident),
+        })),
+        SqlExpr::CompoundIdentifier(idents) => convert_compound_column_ref(idents),
         SqlExpr::Value(value) => convert_value(value.into()),
         SqlExpr::UnaryOp { op, expr } => Ok(Expression::UnaryOp {
             op: convert_unary_op(op)?,
@@ -323,6 +313,132 @@ fn convert_expr(expr: SqlExpr) -> Result<Expression, QueryError> {
         }),
         SqlExpr::Nested(expr) => convert_expr(*expr),
         _ => Err(QueryError::UnsupportedExpression),
+    }
+}
+
+fn convert_compound_column_ref(idents: Vec<Ident>) -> Result<Expression, QueryError> {
+    let column_ref = match idents.as_slice() {
+        [table, column] => ParsedColumnRef {
+            qualifier: Some(ColumnQualifier::Table {
+                table: ident_to_string(table),
+            }),
+            column: ident_to_string(column),
+        },
+        [schema, table, column] => ParsedColumnRef {
+            qualifier: Some(ColumnQualifier::SchemaTable {
+                schema: ident_to_string(schema),
+                table: ident_to_string(table),
+            }),
+            column: ident_to_string(column),
+        },
+        _ => return Err(QueryError::UnsupportedExpression),
+    };
+
+    Ok(Expression::Column(column_ref))
+}
+
+fn convert_table_with_joins(table: TableWithJoins) -> Result<TableRef, QueryError> {
+    let mut table_ref = convert_table_factor(table.relation)?;
+
+    for join in table.joins {
+        let (join_type, right, condition) = convert_join(join)?;
+        table_ref = TableRef::Join {
+            left: Box::new(table_ref),
+            right: Box::new(right),
+            join_type,
+            condition,
+        };
+    }
+
+    Ok(table_ref)
+}
+
+fn convert_table_factor(factor: TableFactor) -> Result<TableRef, QueryError> {
+    match factor {
+        TableFactor::Table {
+            name,
+            alias,
+            args,
+            with_hints,
+            version,
+            with_ordinality,
+            partitions,
+            json_path,
+            sample,
+            index_hints,
+        } => {
+            if args.is_some()
+                || !with_hints.is_empty()
+                || version.is_some()
+                || with_ordinality
+                || !partitions.is_empty()
+                || json_path.is_some()
+                || sample.is_some()
+                || !index_hints.is_empty()
+            {
+                return Err(QueryError::UnsupportedQuery(
+                    "unsupported FROM table feature",
+                ));
+            }
+
+            Ok(TableRef::BaseTable {
+                table_name: object_name_to_string(&name),
+                alias: convert_table_alias(alias)?,
+            })
+        }
+        _ => Err(QueryError::UnsupportedQuery(
+            "FROM source must be a base table",
+        )),
+    }
+}
+
+fn convert_join(join: Join) -> Result<(JoinType, TableRef, Option<Expression>), QueryError> {
+    if join.global {
+        return Err(QueryError::UnsupportedQuery("GLOBAL JOIN is not supported"));
+    }
+
+    let right = convert_table_factor(join.relation)?;
+    let (join_type, condition) = match join.join_operator {
+        JoinOperator::Join(constraint) | JoinOperator::Inner(constraint) => (
+            JoinType::Inner,
+            Some(convert_join_on_constraint(constraint)?),
+        ),
+        JoinOperator::Left(constraint) => (
+            JoinType::Left,
+            Some(convert_join_on_constraint(constraint)?),
+        ),
+        JoinOperator::CrossJoin(JoinConstraint::None) => (JoinType::Cross, None),
+        _ => {
+            return Err(QueryError::UnsupportedQuery(
+                "only JOIN, INNER JOIN, LEFT JOIN, and CROSS JOIN are supported",
+            ));
+        }
+    };
+
+    Ok((join_type, right, condition))
+}
+
+fn convert_join_on_constraint(constraint: JoinConstraint) -> Result<Expression, QueryError> {
+    match constraint {
+        JoinConstraint::On(expr) => convert_expr(expr),
+        _ => Err(QueryError::UnsupportedQuery(
+            "JOIN and LEFT JOIN require an ON condition",
+        )),
+    }
+}
+
+fn convert_table_alias(alias: Option<TableAlias>) -> Result<Option<String>, QueryError> {
+    match alias {
+        Some(alias) => {
+            if !alias.columns.is_empty() || alias.at.is_some() {
+                return Err(QueryError::UnsupportedQuery(
+                    "table alias columns are not supported",
+                ));
+            }
+
+            Ok(Some(ident_to_string(&alias.name)))
+        }
+        None => Ok(None),
     }
 }
 
@@ -433,7 +549,10 @@ mod tests {
         expect![[r#"
             Select(
                 SelectStatement {
-                    table_name: "users",
+                    table: BaseTable {
+                        table_name: "users",
+                        alias: None,
+                    },
                     projection: [
                         Wildcard,
                     ],
@@ -450,16 +569,25 @@ mod tests {
         expect![[r#"
             Select(
                 SelectStatement {
-                    table_name: "users",
+                    table: BaseTable {
+                        table_name: "users",
+                        alias: None,
+                    },
                     projection: [
                         Expression(
                             Column(
-                                "id",
+                                ParsedColumnRef {
+                                    qualifier: None,
+                                    column: "id",
+                                },
                             ),
                         ),
                         Expression(
                             Column(
-                                "name",
+                                ParsedColumnRef {
+                                    qualifier: None,
+                                    column: "name",
+                                },
                             ),
                         ),
                     ],
@@ -470,12 +598,106 @@ mod tests {
     }
 
     #[test]
+    fn parses_select_joins() {
+        let statement =
+            parse_sql("select * from users join orders on users.id = orders.user_id").unwrap();
+
+        expect![[r#"
+            Select(
+                SelectStatement {
+                    table: Join {
+                        left: BaseTable {
+                            table_name: "users",
+                            alias: None,
+                        },
+                        right: BaseTable {
+                            table_name: "orders",
+                            alias: None,
+                        },
+                        join_type: Inner,
+                        condition: Some(
+                            BinaryOp {
+                                left: Column(
+                                    ParsedColumnRef {
+                                        qualifier: Some(
+                                            Table {
+                                                table: "users",
+                                            },
+                                        ),
+                                        column: "id",
+                                    },
+                                ),
+                                op: Eq,
+                                right: Column(
+                                    ParsedColumnRef {
+                                        qualifier: Some(
+                                            Table {
+                                                table: "orders",
+                                            },
+                                        ),
+                                        column: "user_id",
+                                    },
+                                ),
+                            },
+                        ),
+                    },
+                    projection: [
+                        Wildcard,
+                    ],
+                    where_clause: None,
+                },
+            )"#]]
+        .assert_eq(&format!("{statement:#?}"));
+
+        let statement =
+            parse_sql("select * from users inner join orders on users.id = orders.user_id")
+                .unwrap();
+
+        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: None }, right: BaseTable { table_name: "orders", alias: None }, join_type: Inner, condition: Some(BinaryOp { left: Column(ParsedColumnRef { qualifier: Some(Table { table: "users" }), column: "id" }), op: Eq, right: Column(ParsedColumnRef { qualifier: Some(Table { table: "orders" }), column: "user_id" }) }) }, projection: [Wildcard], where_clause: None })"#]]
+            .assert_eq(&format!("{statement:?}"));
+
+        let statement =
+            parse_sql("select * from users left join orders on users.id = orders.user_id").unwrap();
+
+        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: None }, right: BaseTable { table_name: "orders", alias: None }, join_type: Left, condition: Some(BinaryOp { left: Column(ParsedColumnRef { qualifier: Some(Table { table: "users" }), column: "id" }), op: Eq, right: Column(ParsedColumnRef { qualifier: Some(Table { table: "orders" }), column: "user_id" }) }) }, projection: [Wildcard], where_clause: None })"#]]
+            .assert_eq(&format!("{statement:?}"));
+
+        let statement = parse_sql("select * from users cross join orders").unwrap();
+
+        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: None }, right: BaseTable { table_name: "orders", alias: None }, join_type: Cross, condition: None }, projection: [Wildcard], where_clause: None })"#]]
+            .assert_eq(&format!("{statement:?}"));
+    }
+
+    #[test]
+    fn parses_select_join_aliases() {
+        let statement =
+            parse_sql("select * from users u join orders o on u.id = o.user_id").unwrap();
+
+        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: Some("u") }, right: BaseTable { table_name: "orders", alias: Some("o") }, join_type: Inner, condition: Some(BinaryOp { left: Column(ParsedColumnRef { qualifier: Some(Table { table: "u" }), column: "id" }), op: Eq, right: Column(ParsedColumnRef { qualifier: Some(Table { table: "o" }), column: "user_id" }) }) }, projection: [Wildcard], where_clause: None })"#]]
+            .assert_eq(&format!("{statement:?}"));
+    }
+
+    #[test]
+    fn rejects_unsupported_select_joins() {
+        for sql in [
+            "select * from users right join orders on users.id = orders.user_id",
+            "select * from users full join orders on users.id = orders.user_id",
+            "select * from users natural join orders",
+            "select * from users join orders using (id)",
+            "select * from users, orders",
+        ] {
+            let err = parse_sql(sql).unwrap_err();
+            assert!(matches!(err, QueryError::UnsupportedQuery(_)));
+        }
+    }
+
+    #[test]
     fn parses_select_projection_unary_operators() {
         let statement =
             parse_sql("select not active, -score, name is null, name is not null from users")
                 .unwrap();
 
-        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(UnaryOp { op: Not, expr: Column("active") }), Expression(UnaryOp { op: Neg, expr: Column("score") }), Expression(UnaryOp { op: IsNull, expr: Column("name") }), Expression(UnaryOp { op: IsNotNull, expr: Column("name") })], where_clause: None })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(UnaryOp { op: Not, expr: Column(ParsedColumnRef { qualifier: None, column: "active" }) }), Expression(UnaryOp { op: Neg, expr: Column(ParsedColumnRef { qualifier: None, column: "score" }) }), Expression(UnaryOp { op: IsNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) }), Expression(UnaryOp { op: IsNotNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) })], where_clause: None })"#]]
             .assert_eq(&format!("{statement:?}"));
     }
 
@@ -483,7 +705,7 @@ mod tests {
     fn parses_select_projection_arithmetic_operators() {
         let statement = parse_sql("select score + 1, score - 1, -score + 1 from users").unwrap();
 
-        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(BinaryOp { left: Column("score"), op: Plus, right: Literal(Integer(1)) }), Expression(BinaryOp { left: Column("score"), op: Minus, right: Literal(Integer(1)) }), Expression(BinaryOp { left: UnaryOp { op: Neg, expr: Column("score") }, op: Plus, right: Literal(Integer(1)) })], where_clause: None })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(BinaryOp { left: Column(ParsedColumnRef { qualifier: None, column: "score" }), op: Plus, right: Literal(Integer(1)) }), Expression(BinaryOp { left: Column(ParsedColumnRef { qualifier: None, column: "score" }), op: Minus, right: Literal(Integer(1)) }), Expression(BinaryOp { left: UnaryOp { op: Neg, expr: Column(ParsedColumnRef { qualifier: None, column: "score" }) }, op: Plus, right: Literal(Integer(1)) })], where_clause: None })"#]]
             .assert_eq(&format!("{statement:?}"));
     }
 
@@ -494,18 +716,27 @@ mod tests {
         expect![[r#"
             Select(
                 SelectStatement {
-                    table_name: "users",
+                    table: BaseTable {
+                        table_name: "users",
+                        alias: None,
+                    },
                     projection: [
                         Expression(
                             Column(
-                                "id",
+                                ParsedColumnRef {
+                                    qualifier: None,
+                                    column: "id",
+                                },
                             ),
                         ),
                     ],
                     where_clause: Some(
                         BinaryOp {
                             left: Column(
-                                "id",
+                                ParsedColumnRef {
+                                    qualifier: None,
+                                    column: "id",
+                                },
                             ),
                             op: Eq,
                             right: Literal(
@@ -524,27 +755,27 @@ mod tests {
     fn parses_select_where_unary_operators() {
         let statement = parse_sql("select id from users where not active").unwrap();
 
-        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(Column("id"))], where_clause: Some(UnaryOp { op: Not, expr: Column("active") }) })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: Not, expr: Column(ParsedColumnRef { qualifier: None, column: "active" }) }) })"#]]
             .assert_eq(&format!("{statement:?}"));
 
         let statement = parse_sql("select id from users where -score = 1").unwrap();
 
-        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(Column("id"))], where_clause: Some(BinaryOp { left: UnaryOp { op: Neg, expr: Column("score") }, op: Eq, right: Literal(Integer(1)) }) })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(BinaryOp { left: UnaryOp { op: Neg, expr: Column(ParsedColumnRef { qualifier: None, column: "score" }) }, op: Eq, right: Literal(Integer(1)) }) })"#]]
             .assert_eq(&format!("{statement:?}"));
 
         let statement = parse_sql("select id from users where name is null").unwrap();
 
-        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(Column("id"))], where_clause: Some(UnaryOp { op: IsNull, expr: Column("name") }) })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: IsNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) }) })"#]]
             .assert_eq(&format!("{statement:?}"));
 
         let statement = parse_sql("select id from users where name is not null").unwrap();
 
-        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(Column("id"))], where_clause: Some(UnaryOp { op: IsNotNull, expr: Column("name") }) })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: IsNotNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) }) })"#]]
             .assert_eq(&format!("{statement:?}"));
 
         let statement = parse_sql("select id from users where not (name is null)").unwrap();
 
-        expect![[r#"Select(SelectStatement { table_name: "users", projection: [Expression(Column("id"))], where_clause: Some(UnaryOp { op: Not, expr: UnaryOp { op: IsNull, expr: Column("name") } }) })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: Not, expr: UnaryOp { op: IsNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) } }) })"#]]
             .assert_eq(&format!("{statement:?}"));
     }
 
@@ -676,7 +907,10 @@ mod tests {
                     columns: None,
                     source: Select(
                         SelectStatement {
-                            table_name: "t1",
+                            table: BaseTable {
+                                table_name: "t1",
+                                alias: None,
+                            },
                             projection: [
                                 Wildcard,
                             ],
@@ -718,7 +952,10 @@ mod tests {
                     where_clause: Some(
                         BinaryOp {
                             left: Column(
-                                "id",
+                                ParsedColumnRef {
+                                    qualifier: None,
+                                    column: "id",
+                                },
                             ),
                             op: Eq,
                             right: Literal(
@@ -744,7 +981,10 @@ mod tests {
                     where_clause: Some(
                         BinaryOp {
                             left: Column(
-                                "id",
+                                ParsedColumnRef {
+                                    qualifier: None,
+                                    column: "id",
+                                },
                             ),
                             op: Eq,
                             right: Literal(

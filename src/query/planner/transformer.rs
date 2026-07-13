@@ -179,7 +179,8 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         for (insert_col, child_col) in insert_columns.iter().zip(child_schema.columns()) {
             let insert_col_name = match insert_col {
                 ColumnRef::Unqualified { column } => column,
-                ColumnRef::TableQualified { column, .. } => column,
+                ColumnRef::TableQualified { column, .. }
+                | ColumnRef::SchemaTableQualified { column, .. } => column,
             };
 
             let target_col_idx = table_schema
