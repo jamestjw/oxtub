@@ -1,12 +1,27 @@
 use crate::{
     catalog::{schema::Schema, table::TableId},
-    query::binder::expression::BoundExpression,
+    query::{binder::expression::BoundExpression, table_ref::JoinType},
 };
 
 #[derive(Debug)]
-pub enum TableRef {
+pub enum BoundTableRef {
     BaseTable(BoundBaseTableRef),
     ExprList(BoundExpressionListRef),
+    Join(BoundJoin),
+}
+
+impl BoundTableRef {
+    pub fn base_tables(&self) -> Vec<&BoundBaseTableRef> {
+        match self {
+            BoundTableRef::BaseTable(table) => vec![table],
+            BoundTableRef::ExprList(_) => vec![],
+            BoundTableRef::Join(join) => {
+                let mut tables = join.left().base_tables();
+                tables.extend(join.right().base_tables());
+                tables
+            }
+        }
+    }
 }
 
 /**
@@ -70,4 +85,36 @@ impl BoundExpressionListRef {
     }
 }
 
-// TODO: our types of table refs later
+#[derive(Debug)]
+pub struct BoundJoin {
+    left: Box<BoundTableRef>,
+    right: Box<BoundTableRef>,
+    join_type: JoinType,
+    condition: Option<BoundExpression>,
+}
+
+impl BoundJoin {
+    pub fn new(
+        left: BoundTableRef,
+        right: BoundTableRef,
+        join_type: JoinType,
+        condition: Option<BoundExpression>,
+    ) -> Self {
+        Self {
+            left: Box::new(left),
+            right: Box::new(right),
+            join_type,
+            condition,
+        }
+    }
+
+    pub fn left(&self) -> &BoundTableRef {
+        &self.left
+    }
+
+    pub fn right(&self) -> &BoundTableRef {
+        &self.right
+    }
+}
+
+// TODO: add types of table refs later

@@ -17,8 +17,9 @@ use crate::{
         expression::{BinaryOperator, ColumnQualifier, Expression, ParsedColumnRef, UnaryOperator},
         statement::{
             CreateColumn, CreateTableStatement, DeleteStatement, InsertSource, InsertStatement,
-            JoinType, SelectItem, SelectStatement, Statement, TableRef, UpdateStatement,
+            SelectItem, SelectStatement, Statement, UpdateStatement,
         },
+        table_ref::{JoinType, TableRef},
     },
     types::value::Value,
 };

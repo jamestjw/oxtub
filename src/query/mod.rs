@@ -9,3 +9,4 @@ pub mod planner;
 #[cfg(test)]
 mod slt;
 pub mod statement;
+pub mod table_ref;

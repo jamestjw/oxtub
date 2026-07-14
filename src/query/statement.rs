@@ -1,4 +1,7 @@
-use crate::{catalog::types::SqlType, query::expression::Expression};
+use crate::{
+    catalog::types::SqlType,
+    query::{expression::Expression, table_ref::TableRef},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -14,27 +17,6 @@ pub struct SelectStatement {
     pub table: TableRef,
     pub projection: Vec<SelectItem>,
     pub where_clause: Option<Expression>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum TableRef {
-    BaseTable {
-        table_name: String,
-        alias: Option<String>,
-    },
-    Join {
-        left: Box<TableRef>,
-        right: Box<TableRef>,
-        join_type: JoinType,
-        condition: Option<Expression>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JoinType {
-    Inner,
-    Left,
-    Cross,
 }
 
 #[derive(Debug, Clone, PartialEq)]

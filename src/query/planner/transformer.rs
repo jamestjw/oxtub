@@ -7,7 +7,7 @@ use crate::{
                 BoundDelete, BoundInsert, BoundInsertSource, BoundSelect, BoundStatement,
                 BoundUpdate,
             },
-            table_ref::{BoundExpressionListRef, TableRef},
+            table_ref::{BoundExpressionListRef, BoundTableRef},
         },
         expression::{BinaryOperator, UnaryOperator},
         planner::{
@@ -54,7 +54,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         let table_oid = bound_update.table.tbl_oid();
         let table_schema = bound_update.table.schema().clone();
 
-        let planned_table = self.plan_table_ref(TableRef::BaseTable(bound_update.table))?;
+        let planned_table = self.plan_table_ref(BoundTableRef::BaseTable(bound_update.table))?;
         let condition = match bound_update.filter_expr {
             Some(expr) => {
                 let (_, expr) = self.plan_expression(expr, &[&planned_table])?;
@@ -126,7 +126,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
     fn plan_delete(&self, bound_delete: BoundDelete) -> Result<PlanNode, PlannerError> {
         let table_oid = bound_delete.table.tbl_oid();
 
-        let planned_table = self.plan_table_ref(TableRef::BaseTable(bound_delete.table))?;
+        let planned_table = self.plan_table_ref(BoundTableRef::BaseTable(bound_delete.table))?;
         let condition = match bound_delete.filter_expr {
             Some(expr) => {
                 let (_, expr) = self.plan_expression(expr, &[&planned_table])?;
@@ -304,9 +304,9 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         Ok(plan)
     }
 
-    fn plan_table_ref(&self, tbl_ref: TableRef) -> Result<PlanNode, PlannerError> {
+    fn plan_table_ref(&self, tbl_ref: BoundTableRef) -> Result<PlanNode, PlannerError> {
         match tbl_ref {
-            TableRef::BaseTable(bound_base_table_ref) => {
+            BoundTableRef::BaseTable(bound_base_table_ref) => {
                 let tbl_info = self
                     .catalog
                     .get_tbl_by_name(bound_base_table_ref.tbl_name())?;
@@ -321,9 +321,10 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                     }),
                 })
             }
-            TableRef::ExprList(bound_expression_list_ref) => {
+            BoundTableRef::ExprList(bound_expression_list_ref) => {
                 panic!("planner does not support ExprList")
             }
+            BoundTableRef::Join(_) => todo!("planner does not support joins yet"),
         }
     }
 

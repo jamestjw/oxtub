@@ -10,13 +10,14 @@ use crate::{
                 BoundCreateTable, BoundDelete, BoundInsert, BoundInsertSource, BoundSelect,
                 BoundStatement, BoundUpdate,
             },
-            table_ref::{BoundBaseTableRef, BoundExpressionListRef, TableRef},
+            table_ref::{BoundBaseTableRef, BoundExpressionListRef, BoundJoin, BoundTableRef},
         },
         expression::{ColumnQualifier, Expression, ParsedColumnRef},
         statement::{
             CreateColumn, CreateTableStatement, DeleteStatement, InsertSource, InsertStatement,
-            SelectItem, SelectStatement, Statement, TableRef as ParsedTableRef, UpdateStatement,
+            SelectItem, SelectStatement, Statement, UpdateStatement,
         },
+        table_ref::TableRef as ParsedTableRef,
     },
 };
 
@@ -29,7 +30,7 @@ struct BindContext<'a> {
 }
 
 enum BindScope<'a> {
-    BaseTable(&'a BoundBaseTableRef),
+    Tables(Vec<&'a BoundBaseTableRef>),
     ExprList(&'a BoundExpressionListRef),
 }
 
@@ -40,16 +41,27 @@ impl<'a> BindContext<'a> {
 
     fn base_table_scope(table: &'a BoundBaseTableRef) -> Self {
         Self {
-            scope: Some(BindScope::BaseTable(table)),
+            scope: Some(BindScope::Tables(vec![table])),
         }
     }
 
-    fn table_ref_scope(table: &'a TableRef) -> Self {
+    fn table_ref_scope(table: &'a BoundTableRef) -> Self {
         match table {
-            TableRef::BaseTable(table) => Self::base_table_scope(table),
-            TableRef::ExprList(expr_list) => Self {
+            BoundTableRef::ExprList(expr_list) => Self {
                 scope: Some(BindScope::ExprList(expr_list)),
             },
+            BoundTableRef::BaseTable(_) | BoundTableRef::Join(_) => Self {
+                scope: Some(BindScope::Tables(table.base_tables())),
+            },
+        }
+    }
+
+    fn table_ref_pair_scope(left: &'a BoundTableRef, right: &'a BoundTableRef) -> Self {
+        let mut tables = left.base_tables();
+        tables.extend(right.base_tables());
+
+        Self {
+            scope: Some(BindScope::Tables(tables)),
         }
     }
 }
@@ -109,19 +121,35 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
         Ok(BoundStatement::Delete(BoundDelete { table, filter_expr }))
     }
 
+    fn bind_table_ref(&self, table_ref: ParsedTableRef) -> Result<BoundTableRef, BinderError> {
+        match table_ref {
+            ParsedTableRef::BaseTable { table_name, alias } => Ok(BoundTableRef::BaseTable(
+                self.bind_base_table_ref(table_name, alias)?,
+            )),
+            ParsedTableRef::Join {
+                left,
+                right,
+                join_type,
+                condition,
+            } => {
+                let left = self.bind_table_ref(*left)?;
+                let right = self.bind_table_ref(*right)?;
+                let context = BindContext::table_ref_pair_scope(&left, &right);
+                let condition = match condition {
+                    Some(expr) => Some(self.bind_expression(expr, &context)?),
+                    None => None,
+                };
+
+                Ok(BoundTableRef::Join(BoundJoin::new(
+                    left, right, join_type, condition,
+                )))
+            }
+        }
+    }
+
     fn bind_select(&self, stmt: SelectStatement) -> Result<BoundSelect, BinderError> {
-        // TODO: should support aliases!
         // TODO: can also select without a From clause
-        let tbl_ref = match stmt.table {
-            ParsedTableRef::BaseTable { table_name, alias } => {
-                TableRef::BaseTable(self.bind_base_table_ref(table_name, alias)?)
-            }
-            ParsedTableRef::Join { .. } => {
-                return Err(BinderError::UnsupportedExpression(
-                    "joins are not supported by binder yet".into(),
-                ));
-            }
-        };
+        let tbl_ref = self.bind_table_ref(stmt.table)?;
         let context = BindContext::table_ref_scope(&tbl_ref);
         let projection = self.bind_select_list(stmt.projection, &context)?;
         let where_ = stmt
@@ -162,19 +190,22 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     }
 
     fn get_all_cols_from_scope(context: &BindContext) -> Result<Vec<BoundExpression>, BinderError> {
-        match context.scope {
+        match &context.scope {
             None => Err(BinderError::UnsupportedExpression(
                 "select * without table scope".into(),
             )),
-            Some(BindScope::BaseTable(bound_base_table_ref)) => {
-                let tbl_name = bound_base_table_ref.bound_tbl_name();
-                let cols = bound_base_table_ref.schema().columns();
-                let mut res = Vec::with_capacity(cols.len());
-                for col in cols {
-                    res.push(BoundExpression::Column(ColumnRef::TableQualified {
-                        table: tbl_name.into(),
-                        column: col.name().into(),
-                    }));
+            Some(BindScope::Tables(tables)) => {
+                let mut res = vec![];
+                for table in tables {
+                    let tbl_name = table.bound_tbl_name();
+                    let cols = table.schema().columns();
+
+                    for col in cols {
+                        res.push(BoundExpression::Column(ColumnRef::TableQualified {
+                            table: tbl_name.into(),
+                            column: col.name().into(),
+                        }));
+                    }
                 }
 
                 Ok(res)
@@ -323,20 +354,10 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
     ) -> Result<ColumnRef, BinderError> {
         let ParsedColumnRef { qualifier, column } = column;
 
-        match context.scope {
-            Some(BindScope::BaseTable(table)) => match qualifier {
-                None => Self::resolve_column_ref_from_base_table_ref(table, column),
-                Some(ColumnQualifier::Table { table: qualifier }) => {
-                    if !table.matches_bound_tbl_name(&qualifier) {
-                        return Err(BinderError::MissingFromClauseEntry(qualifier));
-                    }
-
-                    Self::resolve_column_ref_from_base_table_ref(table, column)
-                }
-                Some(ColumnQualifier::SchemaTable { schema, table }) => Err(
-                    BinderError::MissingFromClauseEntry(format!("{schema}.{table}")),
-                ),
-            },
+        match &context.scope {
+            Some(BindScope::Tables(tables)) => {
+                Self::resolve_column_ref_from_tables(&tables, qualifier, column)
+            }
             Some(BindScope::ExprList(_)) => Err(BinderError::UnsupportedExpression(format!(
                 "column reference `{column}` in expression list scope"
             ))),
@@ -344,6 +365,53 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
                 "column reference `{column}` without table scope"
             ))),
         }
+    }
+
+    fn resolve_column_ref_from_tables(
+        tables: &[&BoundBaseTableRef],
+        qualifier: Option<ColumnQualifier>,
+        column: String,
+    ) -> Result<ColumnRef, BinderError> {
+        match qualifier {
+            None => Self::resolve_unqualified_column_ref_from_tables(tables, column),
+            Some(ColumnQualifier::Table { table: qualifier }) => {
+                let Some(table) = tables
+                    .iter()
+                    .copied()
+                    .find(|table| table.matches_bound_tbl_name(&qualifier))
+                else {
+                    return Err(BinderError::MissingFromClauseEntry(qualifier));
+                };
+
+                Self::resolve_column_ref_from_base_table_ref(table, column)
+            }
+            Some(ColumnQualifier::SchemaTable { .. }) => todo!("schema not supported yet"),
+        }
+    }
+
+    fn resolve_unqualified_column_ref_from_tables(
+        tables: &[&BoundBaseTableRef],
+        col_name: String,
+    ) -> Result<ColumnRef, BinderError> {
+        let mut resolved_column = None;
+
+        for table in tables {
+            if let Some(column_ref) = Self::resolve_column_ref_schema(table.schema(), &col_name)? {
+                if resolved_column.is_some() {
+                    return Err(BinderError::AmbiguousColumn(col_name));
+                }
+
+                let ColumnRef::Unqualified { column } = column_ref else {
+                    unreachable!("schema column resolution should produce unqualified refs")
+                };
+                resolved_column = Some(ColumnRef::TableQualified {
+                    table: table.bound_tbl_name().into(),
+                    column,
+                });
+            }
+        }
+
+        resolved_column.ok_or(BinderError::ColumnNotFound(col_name))
     }
 
     fn resolve_column_ref_from_base_table_ref(
@@ -472,12 +540,16 @@ mod tests {
     }
 
     fn create_users_table(catalog: &mut Catalog<'_>) {
+        create_table(catalog, "users");
+    }
+
+    fn create_table(catalog: &mut Catalog<'_>, name: &str) {
         let schema = Schema::new(&[
             Column::new_static("id".to_string(), SqlType::Integer),
             Column::new_variable("name".to_string(), SqlType::Varchar, 32),
         ]);
 
-        catalog.create_tbl("users".to_string(), schema).unwrap();
+        catalog.create_tbl(name.to_string(), schema).unwrap();
     }
 
     #[test]
@@ -708,6 +780,215 @@ mod tests {
             ]
         );
         assert_eq!(select.where_, None);
+    }
+
+    #[test]
+    fn binds_join_condition_against_both_tables() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        create_table(&mut catalog, "orders");
+        let binder = Binder::new(&catalog);
+        let statement =
+            parse_sql("select users.id from users join orders on users.id = orders.id").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Select(select) = bound else {
+            panic!("expected select statement");
+        };
+
+        expect![[r#"
+            Join(
+                BoundJoin {
+                    left: BaseTable(
+                        BoundBaseTableRef {
+                            table_name: "users",
+                            table_oid: 0,
+                            alias: None,
+                            schema: Schema {
+                                inlined_storage_size: 9,
+                                columns: [
+                                    Column {
+                                        name: "id",
+                                        sql_type: Integer,
+                                        value_offset: 1,
+                                        size: Inline(
+                                            4,
+                                        ),
+                                    },
+                                    Column {
+                                        name: "name",
+                                        sql_type: Varchar,
+                                        value_offset: 5,
+                                        size: Variable(
+                                            32,
+                                        ),
+                                    },
+                                ],
+                                uninlined_columns: [
+                                    1,
+                                ],
+                            },
+                        },
+                    ),
+                    right: BaseTable(
+                        BoundBaseTableRef {
+                            table_name: "orders",
+                            table_oid: 1,
+                            alias: None,
+                            schema: Schema {
+                                inlined_storage_size: 9,
+                                columns: [
+                                    Column {
+                                        name: "id",
+                                        sql_type: Integer,
+                                        value_offset: 1,
+                                        size: Inline(
+                                            4,
+                                        ),
+                                    },
+                                    Column {
+                                        name: "name",
+                                        sql_type: Varchar,
+                                        value_offset: 5,
+                                        size: Variable(
+                                            32,
+                                        ),
+                                    },
+                                ],
+                                uninlined_columns: [
+                                    1,
+                                ],
+                            },
+                        },
+                    ),
+                    join_type: Inner,
+                    condition: Some(
+                        BinaryOp {
+                            left: Column(
+                                TableQualified {
+                                    table: "users",
+                                    column: "id",
+                                },
+                            ),
+                            op: Eq,
+                            right: Column(
+                                TableQualified {
+                                    table: "orders",
+                                    column: "id",
+                                },
+                            ),
+                        },
+                    ),
+                },
+            )"#]]
+        .assert_eq(&format!("{:#?}", select.table));
+    }
+
+    #[test]
+    fn binds_join_condition_against_aliased_tables() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        create_table(&mut catalog, "orders");
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("select u.id from users u join orders o on u.id = o.id").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Select(select) = bound else {
+            panic!("expected select statement");
+        };
+
+        expect![[r#"
+            Join(
+                BoundJoin {
+                    left: BaseTable(
+                        BoundBaseTableRef {
+                            table_name: "users",
+                            table_oid: 0,
+                            alias: Some(
+                                "u",
+                            ),
+                            schema: Schema {
+                                inlined_storage_size: 9,
+                                columns: [
+                                    Column {
+                                        name: "id",
+                                        sql_type: Integer,
+                                        value_offset: 1,
+                                        size: Inline(
+                                            4,
+                                        ),
+                                    },
+                                    Column {
+                                        name: "name",
+                                        sql_type: Varchar,
+                                        value_offset: 5,
+                                        size: Variable(
+                                            32,
+                                        ),
+                                    },
+                                ],
+                                uninlined_columns: [
+                                    1,
+                                ],
+                            },
+                        },
+                    ),
+                    right: BaseTable(
+                        BoundBaseTableRef {
+                            table_name: "orders",
+                            table_oid: 1,
+                            alias: Some(
+                                "o",
+                            ),
+                            schema: Schema {
+                                inlined_storage_size: 9,
+                                columns: [
+                                    Column {
+                                        name: "id",
+                                        sql_type: Integer,
+                                        value_offset: 1,
+                                        size: Inline(
+                                            4,
+                                        ),
+                                    },
+                                    Column {
+                                        name: "name",
+                                        sql_type: Varchar,
+                                        value_offset: 5,
+                                        size: Variable(
+                                            32,
+                                        ),
+                                    },
+                                ],
+                                uninlined_columns: [
+                                    1,
+                                ],
+                            },
+                        },
+                    ),
+                    join_type: Inner,
+                    condition: Some(
+                        BinaryOp {
+                            left: Column(
+                                TableQualified {
+                                    table: "u",
+                                    column: "id",
+                                },
+                            ),
+                            op: Eq,
+                            right: Column(
+                                TableQualified {
+                                    table: "o",
+                                    column: "id",
+                                },
+                            ),
+                        },
+                    ),
+                },
+            )"#]]
+        .assert_eq(&format!("{:#?}", select.table));
     }
 
     #[test]
