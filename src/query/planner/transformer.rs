@@ -19,8 +19,8 @@ use crate::{
                 PlannedExpression, PlannedExpressionKind,
             },
             plan::{
-                DeletePlan, FilterPlan, InsertPlan, PlanNode, PlanNodeKind, ProjectionPlan,
-                SeqScanPlan, UpdatePlan, ValuesPlan,
+                DeletePlan, FilterPlan, InsertPlan, NestedLoopJoinPlan, PlanNode, PlanNodeKind,
+                ProjectionPlan, SeqScanPlan, UpdatePlan, ValuesPlan,
             },
         },
     },
@@ -324,7 +324,20 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             BoundTableRef::ExprList(bound_expression_list_ref) => {
                 panic!("planner does not support ExprList")
             }
-            BoundTableRef::Join(_) => todo!("planner does not support joins yet"),
+            BoundTableRef::Join(bound_join) => {
+                let left = self.plan_table_ref(*bound_join.left())?;
+                let right = self.plan_table_ref(*bound_join.right())?;
+
+                Ok(PlanNode {
+                    output_schema: SeqScanPlan::infer_scan_schema(&bound_base_table_ref),
+                    kind: PlanNodeKind::NestedLoopJoin(NestedLoopJoinPlan {
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        join_type: todo!(),
+                        predicate: todo!(),
+                    }),
+                })
+            }
         }
     }
 

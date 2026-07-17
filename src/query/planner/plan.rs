@@ -1,6 +1,9 @@
 use crate::{
     catalog::{column::Column, schema::Schema, table::TableId},
-    query::{binder::table_ref::BoundBaseTableRef, planner::expression::PlannedExpression},
+    query::{
+        binder::table_ref::BoundBaseTableRef, planner::expression::PlannedExpression,
+        table_ref::JoinType,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -82,6 +85,12 @@ impl PlanNode {
             PlanNodeKind::CreateTable(_) => vec![],
             PlanNodeKind::Update(update) => vec![update.child.as_ref()],
             PlanNodeKind::Delete(delete) => vec![delete.child.as_ref()],
+            PlanNodeKind::NestedLoopJoin(nested_loop_join_plan) => {
+                vec![
+                    nested_loop_join_plan.left.as_ref(),
+                    nested_loop_join_plan.right.as_ref(),
+                ]
+            }
         }
     }
 }
@@ -96,6 +105,7 @@ pub enum PlanNodeKind {
     CreateTable(CreateTablePlan),
     Update(UpdatePlan),
     Delete(DeletePlan),
+    NestedLoopJoin(NestedLoopJoinPlan),
 }
 
 #[derive(Debug, Clone)]
@@ -194,4 +204,20 @@ pub struct UpdatePlan {
 pub struct DeletePlan {
     pub table_oid: TableId,
     pub child: Box<PlanNode>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NestedLoopJoinPlan {
+    pub left: Box<PlanNode>,
+    pub right: Box<PlanNode>,
+    pub join_type: JoinType,
+    pub predicate: Option<PlannedExpression>,
+}
+
+impl NestedLoopJoinPlan {
+    fn infer_join_schema(left: &PlanNode, right: &PlanNode) -> Schema {
+        let mut columns = Vec::from(left.output_schema().columns());
+        columns.extend_from_slice(right.output_schema().columns());
+        Schema::new(&columns)
+    }
 }

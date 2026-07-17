@@ -121,6 +121,7 @@ impl<'catalog, 'bpm> ExecutionEngine<'catalog, 'bpm> {
                 )))
             }
             PlanNodeKind::CreateTable(_) => Err(ExecutionError::UnsupportedPlan),
+            PlanNodeKind::NestedLoopJoin(nested_loop_join_plan) => todo!(),
         }
     }
 }
