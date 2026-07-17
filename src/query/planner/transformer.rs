@@ -487,35 +487,46 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         column_ref: ColumnRef,
         children: &[&PlanNode],
     ) -> Result<(Option<String>, ColumnValueExpression, ExpressionType), PlannerError> {
+        let col_name = column_ref.to_str();
         match children {
-            [child] => {
-                let col_name = column_ref.to_str();
-                let child_schema = child.output_schema();
-                let matched_columns = child_schema
-                    .columns()
-                    .iter()
-                    .enumerate()
-                    // Binder normalizes column refs to schema casing and scan schemas
-                    // use the same qualified names.
-                    .filter(|(_, col)| col.name() == col_name)
-                    .collect::<Vec<_>>();
+            [child] => match Self::plan_column_ref_from_child(&col_name, child, 0).as_slice() {
+                [] => panic!("should not be possible as binder would have caught this?"),
+                [(col_expr, expr_type)] => Ok((Some(col_name), col_expr.clone(), *expr_type)),
+                _ => Err(PlannerError::AmbiguousColumn(col_name)),
+            },
+            [left, right] => {
+                let mut matched_columns = Self::plan_column_ref_from_child(&col_name, left, 0);
+                matched_columns.extend(Self::plan_column_ref_from_child(&col_name, right, 1));
 
-                match matched_columns[..] {
+                match matched_columns.as_slice() {
                     [] => panic!("should not be possible as binder would have caught this?"),
-                    [(idx, col)] => Ok((
-                        Some(col_name),
-                        ColumnValueExpression {
-                            tuple_idx: 0,
-                            col_idx: idx,
-                        },
-                        ExpressionType::from_column(col),
-                    )),
+                    [(col_expr, expr_type)] => Ok((Some(col_name), col_expr.clone(), *expr_type)),
                     _ => Err(PlannerError::AmbiguousColumn(col_name)),
                 }
             }
-            [_left, _right] => todo!("binder doesnt support joins yet!"),
             _ => panic!("cannot occur"),
         }
+    }
+
+    fn plan_column_ref_from_child(
+        col_name: &str,
+        child: &PlanNode,
+        tuple_idx: usize,
+    ) -> Vec<(ColumnValueExpression, ExpressionType)> {
+        child
+            .output_schema()
+            .columns()
+            .iter()
+            .enumerate()
+            // Binder normalizes column refs to schema casing and scan schemas use the same qualified names.
+            .filter(|(_, col)| col.name() == col_name)
+            .map(|(col_idx, col)| {
+                (
+                    ColumnValueExpression { tuple_idx, col_idx },
+                    ExpressionType::from_column(col),
+                )
+            })
+            .collect::<Vec<_>>()
     }
 }
 
@@ -602,6 +613,64 @@ mod tests {
 
         assert_eq!(projection.expressions.len(), 1);
         &projection.expressions[0]
+    }
+
+    fn plan_node_with_columns(columns: &[Column]) -> PlanNode {
+        PlanNode {
+            output_schema: Schema::new(columns),
+            kind: PlanNodeKind::Values(ValuesPlan { rows: vec![] }),
+        }
+    }
+
+    #[test]
+    fn plans_column_ref_from_right_child() {
+        let bpm = setup_bpm(3);
+        let catalog = Catalog::new(&bpm);
+        let planner = Planner::new(&catalog);
+        let left =
+            plan_node_with_columns(&[Column::new_static("left.id".to_string(), SqlType::Integer)]);
+        let right = plan_node_with_columns(&[Column::new_variable(
+            "right.name".to_string(),
+            SqlType::Varchar,
+            32,
+        )]);
+
+        let (_, col_expr, expr_type) = planner
+            .plan_column_ref(
+                ColumnRef::TableQualified {
+                    table: "right".to_string(),
+                    column: "name".to_string(),
+                },
+                &[&left, &right],
+            )
+            .unwrap();
+
+        assert_eq!(col_expr.tuple_idx, 1);
+        assert_eq!(col_expr.col_idx, 0);
+        assert_eq!(expr_type.sql_type, SqlType::Varchar);
+        assert_eq!(expr_type.varchar_size, Some(32));
+    }
+
+    #[test]
+    fn rejects_column_ref_matching_both_children() {
+        let bpm = setup_bpm(3);
+        let catalog = Catalog::new(&bpm);
+        let planner = Planner::new(&catalog);
+        let left =
+            plan_node_with_columns(&[Column::new_static("id".to_string(), SqlType::Integer)]);
+        let right =
+            plan_node_with_columns(&[Column::new_static("id".to_string(), SqlType::Integer)]);
+
+        let err = planner
+            .plan_column_ref(
+                ColumnRef::Unqualified {
+                    column: "id".to_string(),
+                },
+                &[&left, &right],
+            )
+            .expect_err("expected ambiguous column error");
+
+        assert!(matches!(err, PlannerError::AmbiguousColumn(col) if col == "id"));
     }
 
     #[test]
