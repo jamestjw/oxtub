@@ -7,6 +7,7 @@ use crate::{
             executor::{Executor, ExecutorContext},
             filter::FilterExecutor,
             insert::InsertExecutor,
+            nested_loop_join::NestedLoopJoinExecutor,
             projection::ProjectionExecutor,
             seq_scan::SeqScanExecutor,
             update::UpdateExecutor,
@@ -121,7 +122,17 @@ impl<'catalog, 'bpm> ExecutionEngine<'catalog, 'bpm> {
                 )))
             }
             PlanNodeKind::CreateTable(_) => Err(ExecutionError::UnsupportedPlan),
-            PlanNodeKind::NestedLoopJoin(nested_loop_join_plan) => todo!(),
+            PlanNodeKind::NestedLoopJoin(nested_loop_join_plan) => {
+                let left_child = self.create_executor(&nested_loop_join_plan.left)?;
+                let right_child = self.create_executor(&nested_loop_join_plan.right)?;
+                Ok(Box::new(NestedLoopJoinExecutor::new(
+                    &self.exec_ctx,
+                    nested_loop_join_plan,
+                    plan.output_schema(),
+                    left_child,
+                    right_child,
+                )))
+            }
         }
     }
 }

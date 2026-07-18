@@ -5,6 +5,7 @@ pub mod executor;
 pub mod expression;
 pub mod filter;
 pub mod insert;
+pub mod nested_loop_join;
 pub mod projection;
 pub mod seq_scan;
 pub mod update;
