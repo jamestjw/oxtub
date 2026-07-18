@@ -124,6 +124,14 @@ pub fn filter_keep_row(
     }
 }
 
+pub fn filter_join_row(
+    predicate: &PlannedExpression,
+    left: &ExecutorRow,
+    right: &ExecutorRow,
+) -> Result<bool, ExecutionError> {
+    todo!()
+}
+
 enum CmpBool {
     True,
     False,

@@ -325,11 +325,11 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                 panic!("planner does not support ExprList")
             }
             BoundTableRef::Join(bound_join) => {
-                let left = self.plan_table_ref(*bound_join.left())?;
-                let right = self.plan_table_ref(*bound_join.right())?;
+                let left = self.plan_table_ref((*bound_join.left()).clone())?;
+                let right = self.plan_table_ref((*bound_join.right()).clone())?;
 
                 Ok(PlanNode {
-                    output_schema: SeqScanPlan::infer_scan_schema(&bound_base_table_ref),
+                    output_schema: todo!(),
                     kind: PlanNodeKind::NestedLoopJoin(NestedLoopJoinPlan {
                         left: Box::new(left),
                         right: Box::new(right),

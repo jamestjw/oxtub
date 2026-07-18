@@ -5,7 +5,7 @@ use crate::{
     types::value::Value,
 };
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ColumnRef {
     Unqualified {
         column: String,
@@ -35,7 +35,7 @@ impl ColumnRef {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone,PartialEq)]
 pub enum BoundExpression {
     Literal(Value),
     Column(ColumnRef),

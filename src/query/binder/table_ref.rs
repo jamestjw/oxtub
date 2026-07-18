@@ -3,7 +3,7 @@ use crate::{
     query::{binder::expression::BoundExpression, table_ref::JoinType},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BoundTableRef {
     BaseTable(BoundBaseTableRef),
     ExprList(BoundExpressionListRef),
@@ -28,7 +28,7 @@ impl BoundTableRef {
  * A bound table ref type for single table. e.g.
 * `SELECT x FROM y`, where `y` is `BoundBaseTableRef`.
  */
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BoundBaseTableRef {
     table_name: String,
     table_oid: TableId,
@@ -72,7 +72,7 @@ impl BoundBaseTableRef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BoundExpressionListRef {
     // A unique identifier for this values list
     pub(crate) identifier: String,
@@ -85,7 +85,7 @@ impl BoundExpressionListRef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BoundJoin {
     left: Box<BoundTableRef>,
     right: Box<BoundTableRef>,
