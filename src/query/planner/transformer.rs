@@ -327,14 +327,22 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             BoundTableRef::Join(bound_join) => {
                 let left = self.plan_table_ref((*bound_join.left()).clone())?;
                 let right = self.plan_table_ref((*bound_join.right()).clone())?;
+                let predicate = match bound_join.condition().as_ref() {
+                    Some(expr) => {
+                        let scope = &[&left, &right];
+                        let (_, expr) = self.plan_expression(expr.clone(), scope)?;
+                        Some(expr)
+                    }
+                    None => None,
+                };
 
                 Ok(PlanNode {
-                    output_schema: todo!(),
+                    output_schema: NestedLoopJoinPlan::infer_join_schema(&left, &right),
                     kind: PlanNodeKind::NestedLoopJoin(NestedLoopJoinPlan {
                         left: Box::new(left),
                         right: Box::new(right),
-                        join_type: todo!(),
-                        predicate: todo!(),
+                        join_type: bound_join.join_type(),
+                        predicate,
                     }),
                 })
             }

@@ -42,10 +42,7 @@ pub fn evaluate_expression(
             let left_value = evaluate_expression(left, row)?;
             let right_value = evaluate_expression(right, row)?;
 
-            match arithmetic_type {
-                ArithmeticType::Plus => eval_numeric_arithmetic(left_value, right_value, eval_add),
-                ArithmeticType::Minus => eval_numeric_arithmetic(left_value, right_value, eval_sub),
-            }
+            eval_arithmetic(arithmetic_type, left_value, right_value)
         }
         PlannedExpressionKind::Logic(LogicExpression {
             left,
@@ -55,48 +52,121 @@ pub fn evaluate_expression(
             let left_value = expect_bool(evaluate_expression(left, row)?)?;
             let right_value = expect_bool(evaluate_expression(right, row)?)?;
 
-            match logic_type {
-                LogicType::And => eval_and(left_value, right_value),
-                LogicType::Or => eval_or(left_value, right_value),
-            }
+            eval_logic(logic_type, left_value, right_value)
         }
         PlannedExpressionKind::Not(not_expression) => {
-            match expect_bool(evaluate_expression(&not_expression.expr, row)?)? {
-                CmpBool::True => Ok(Value::Boolean(false)),
-                CmpBool::False => Ok(Value::Boolean(true)),
-                CmpBool::Null => Ok(Value::Null(SqlType::Boolean)),
-            }
+            eval_not(evaluate_expression(&not_expression.expr, row)?)
         }
         PlannedExpressionKind::Negate(NegateExpression { expr }) => {
-            match evaluate_expression(expr, row)? {
-                Value::SmallInt(i) => i
-                    .checked_neg()
-                    .map(Value::SmallInt)
-                    .ok_or(ExecutionError::NumericOutOfRange),
-                Value::Integer(i) => i
-                    .checked_neg()
-                    .map(Value::Integer)
-                    .ok_or(ExecutionError::NumericOutOfRange),
-                Value::BigInt(i) => i
-                    .checked_neg()
-                    .map(Value::BigInt)
-                    .ok_or(ExecutionError::NumericOutOfRange),
-                Value::Decimal(f) => Ok(Value::Decimal(-f)),
-                v @ Value::Null(
-                    SqlType::BigInt | SqlType::Decimal | SqlType::Integer | SqlType::SmallInt,
-                ) => Ok(v),
-                v => Err(ExecutionError::ExpectedNumeric(v)),
-            }
+            eval_negate(evaluate_expression(expr, row)?)
         }
         PlannedExpressionKind::NullCheck(NullCheckExpression {
             expr,
             null_check_type,
-        }) => match (null_check_type, evaluate_expression(expr, row)?) {
-            (NullCheckType::IsNull, Value::Null(_)) => Ok(Value::Boolean(true)),
-            (NullCheckType::IsNull, _) => Ok(Value::Boolean(false)),
-            (NullCheckType::IsNotNull, Value::Null(_)) => Ok(Value::Boolean(false)),
-            (NullCheckType::IsNotNull, _) => Ok(Value::Boolean(true)),
-        },
+        }) => Ok(eval_null_check(
+            null_check_type,
+            evaluate_expression(expr, row)?,
+        )),
+    }
+}
+
+pub fn evaluate_join_expression(
+    expr: &PlannedExpression,
+    left_row: &ExecutorRow,
+    right_row: &ExecutorRow,
+) -> Result<Value, ExecutionError> {
+    match &expr.kind {
+        PlannedExpressionKind::ColumnValue(ColumnValueExpression { tuple_idx, col_idx }) => {
+            match tuple_idx {
+                0 => Ok(left_row.values[*col_idx].clone()),
+                1 => Ok(right_row.values[*col_idx].clone()),
+                _ => todo!("don't support more than two joined tables"),
+            }
+        }
+        PlannedExpressionKind::ConstantValue(ConstantValueExpression { value }) => {
+            Ok(value.clone())
+        }
+        PlannedExpressionKind::Comparison(ComparisonExpression {
+            left,
+            comparison_type,
+            right,
+        }) => {
+            let left_value = evaluate_join_expression(left, left_row, right_row)?;
+            let right_value = evaluate_join_expression(right, left_row, right_row)?;
+            eval_comparison(left_value, right_value, comparison_type)
+        }
+        PlannedExpressionKind::Arithmetic(ArithmeticExpression {
+            left,
+            arithmetic_type,
+            right,
+        }) => {
+            let left_value = evaluate_join_expression(left, left_row, right_row)?;
+            let right_value = evaluate_join_expression(right, left_row, right_row)?;
+
+            eval_arithmetic(arithmetic_type, left_value, right_value)
+        }
+        PlannedExpressionKind::Logic(LogicExpression {
+            left,
+            logic_type,
+            right,
+        }) => {
+            let left_value = expect_bool(evaluate_join_expression(left, left_row, right_row)?)?;
+            let right_value = expect_bool(evaluate_join_expression(right, left_row, right_row)?)?;
+
+            eval_logic(logic_type, left_value, right_value)
+        }
+
+        PlannedExpressionKind::Not(not_expression) => {
+            eval_not(evaluate_join_expression(&not_expression.expr, left_row, right_row)?)
+        }
+        PlannedExpressionKind::Negate(NegateExpression { expr }) => {
+            eval_negate(evaluate_join_expression(expr, left_row, right_row)?)
+        }
+        PlannedExpressionKind::NullCheck(NullCheckExpression {
+            expr,
+            null_check_type,
+        }) => Ok(eval_null_check(
+            null_check_type,
+            evaluate_join_expression(expr, left_row, right_row)?,
+        )),
+    }
+}
+
+fn eval_not(value: Value) -> Result<Value, ExecutionError> {
+    match expect_bool(value)? {
+        CmpBool::True => Ok(Value::Boolean(false)),
+        CmpBool::False => Ok(Value::Boolean(true)),
+        CmpBool::Null => Ok(Value::Null(SqlType::Boolean)),
+    }
+}
+
+fn eval_negate(value: Value) -> Result<Value, ExecutionError> {
+    match value {
+        Value::SmallInt(i) => i
+            .checked_neg()
+            .map(Value::SmallInt)
+            .ok_or(ExecutionError::NumericOutOfRange),
+        Value::Integer(i) => i
+            .checked_neg()
+            .map(Value::Integer)
+            .ok_or(ExecutionError::NumericOutOfRange),
+        Value::BigInt(i) => i
+            .checked_neg()
+            .map(Value::BigInt)
+            .ok_or(ExecutionError::NumericOutOfRange),
+        Value::Decimal(f) => Ok(Value::Decimal(-f)),
+        v @ Value::Null(
+            SqlType::BigInt | SqlType::Decimal | SqlType::Integer | SqlType::SmallInt,
+        ) => Ok(v),
+        v => Err(ExecutionError::ExpectedNumeric(v)),
+    }
+}
+
+fn eval_null_check(null_check_type: &NullCheckType, value: Value) -> Value {
+    let is_null = value.is_null();
+    match null_check_type {
+        NullCheckType::IsNull => Value::Boolean(is_null),
+        NullCheckType::IsNotNull => Value::Boolean(!is_null),
     }
 }
 
@@ -129,7 +199,11 @@ pub fn filter_join_row(
     left: &ExecutorRow,
     right: &ExecutorRow,
 ) -> Result<bool, ExecutionError> {
-    todo!()
+    match evaluate_join_expression(predicate, left, right)? {
+        Value::Boolean(true) => Ok(true),
+        Value::Boolean(false) | Value::Null(_) => Ok(false),
+        value => Err(ExecutionError::ExpectedBoolean(value)),
+    }
 }
 
 enum CmpBool {
@@ -207,6 +281,17 @@ fn eval_numeric_comparison(
     Ok(Value::Boolean(res))
 }
 
+fn eval_arithmetic(
+    arithmetic_type: &ArithmeticType,
+    left_value: Value,
+    right_value: Value,
+) -> Result<Value, ExecutionError> {
+    match arithmetic_type {
+        ArithmeticType::Plus => eval_numeric_arithmetic(left_value, right_value, eval_add),
+        ArithmeticType::Minus => eval_numeric_arithmetic(left_value, right_value, eval_sub),
+    }
+}
+
 fn eval_ord_comparison<T: PartialEq + PartialOrd>(
     left: T,
     right: T,
@@ -236,6 +321,7 @@ fn is_numeric_type(sql_type: SqlType) -> bool {
 fn eval_numeric_arithmetic(
     left: Value,
     right: Value,
+
     op: fn(CmpNumeric, CmpNumeric) -> Result<Value, ExecutionError>,
 ) -> Result<Value, ExecutionError> {
     let result_type = numeric_result_type(&left, &right)?;
@@ -330,6 +416,17 @@ fn expect_bool(value: Value) -> Result<CmpBool, ExecutionError> {
         Value::Boolean(false) => Ok(CmpBool::False),
         Value::Null(_) => Ok(CmpBool::Null),
         value => Err(ExecutionError::ExpectedBoolean(value)),
+    }
+}
+
+fn eval_logic(
+    logic_type: &LogicType,
+    left_value: CmpBool,
+    right_value: CmpBool,
+) -> Result<Value, ExecutionError> {
+    match logic_type {
+        LogicType::And => eval_and(left_value, right_value),
+        LogicType::Or => eval_or(left_value, right_value),
     }
 }
 

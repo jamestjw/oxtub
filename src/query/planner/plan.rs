@@ -66,6 +66,16 @@ impl PlanNode {
                     child: Box::new(children.pop().unwrap()),
                 })
             }
+            PlanNodeKind::NestedLoopJoin(nested_loop_join_plan) if children.len() == 2 => {
+                let right = children.pop().unwrap();
+                let left = children.pop().unwrap();
+                PlanNodeKind::NestedLoopJoin(NestedLoopJoinPlan {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    join_type: nested_loop_join_plan.join_type,
+                    predicate: nested_loop_join_plan.predicate.clone(),
+                })
+            }
             _ => panic!("unexpected shape"),
         };
 
@@ -215,7 +225,7 @@ pub struct NestedLoopJoinPlan {
 }
 
 impl NestedLoopJoinPlan {
-    fn infer_join_schema(left: &PlanNode, right: &PlanNode) -> Schema {
+    pub fn infer_join_schema(left: &PlanNode, right: &PlanNode) -> Schema {
         let mut columns = Vec::from(left.output_schema().columns());
         columns.extend_from_slice(right.output_schema().columns());
         Schema::new(&columns)

@@ -7,6 +7,7 @@ use crate::{
         planner::plan::NestedLoopJoinPlan,
         table_ref::JoinType,
     },
+    types::value::Value,
 };
 
 pub struct NestedLoopJoinExecutor<'ctx, 'catalog, 'bpm, 'plan> {
@@ -52,9 +53,29 @@ impl<'ctx, 'catalog, 'bpm, 'plan> NestedLoopJoinExecutor<'ctx, 'catalog, 'bpm, '
 
         match right_tuple {
             Some(right_tuple) => values.extend_from_slice(&right_tuple.values),
-            None => todo!(),
+            None => {
+                let right_null_values = output_schema.columns()[values.len()..]
+                    .iter()
+                    .map(|col| Value::Null(col.sql_type()))
+                    .collect::<Vec<_>>();
+                values.extend(right_null_values);
+            }
         }
         ExecutorRow { rid: None, values }
+    }
+
+    pub fn keep_row(
+        &self,
+        left: &ExecutorRow,
+        right: &ExecutorRow,
+    ) -> Result<bool, ExecutionError> {
+        match (&self.plan.predicate, self.plan.join_type) {
+            (_, JoinType::Cross) => Ok(true),
+            (None, _) => Ok(true),
+            (Some(predicate), JoinType::Inner | JoinType::Left) => {
+                filter_join_row(predicate, left, right)
+            }
+        }
     }
 }
 
@@ -65,10 +86,9 @@ impl Executor for NestedLoopJoinExecutor<'_, '_, '_, '_> {
 
     fn next(&mut self, batch_size: usize) -> Result<Vec<ExecutorRow>, ExecutionError> {
         let mut out = Vec::with_capacity(batch_size);
-        let predicate = &self.plan.predicate;
 
         loop {
-            if self.buffered_outer_tuples.len() == 0 {
+            if self.outer_tuple_offset >= self.buffered_outer_tuples.len() {
                 let batch = self.left_child.next(batch_size)?;
                 if batch.is_empty() {
                     return Ok(out);
@@ -79,12 +99,12 @@ impl Executor for NestedLoopJoinExecutor<'_, '_, '_, '_> {
                 self.buffered_outer_tuples = batch;
                 self.outer_tuple_offset = 0;
                 self.outer_tuple_matched = false;
-                self.right_child.init();
+                self.right_child.init()?;
             }
 
             let curr_outer_tuple = &self.buffered_outer_tuples[self.outer_tuple_offset];
 
-            if (self.buffered_inner_tuples.len() == 0) {
+            if self.buffered_inner_tuples.len() == 0 {
                 let batch = self.right_child.next(batch_size)?;
                 if batch.is_empty() {
                     // Inner loop complete, go back to the outer loop to get a new outer tuple
@@ -96,7 +116,7 @@ impl Executor for NestedLoopJoinExecutor<'_, '_, '_, '_> {
 
                     self.outer_tuple_offset += 1;
                     self.outer_tuple_matched = false;
-                    self.right_child.init();
+                    self.right_child.init()?;
 
                     if out.len() >= batch_size {
                         return Ok(out);
@@ -110,12 +130,7 @@ impl Executor for NestedLoopJoinExecutor<'_, '_, '_, '_> {
             }
 
             while let Some(inner_tuple) = self.buffered_inner_tuples.next() {
-                let keep_row = match predicate {
-                    Some(predicate) => filter_join_row(predicate, &curr_outer_tuple, &inner_tuple)?,
-                    None => true,
-                };
-
-                if keep_row {
+                if self.keep_row(curr_outer_tuple, &inner_tuple)? {
                     self.outer_tuple_matched = true;
                     out.push(Self::build_join_tuple(
                         self.output_schema,

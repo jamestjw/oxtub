@@ -115,6 +115,14 @@ impl BoundJoin {
     pub fn right(&self) -> &BoundTableRef {
         &self.right
     }
+
+    pub fn join_type(&self) -> JoinType {
+        self.join_type
+    }
+
+    pub fn condition(&self) -> &Option<BoundExpression> {
+        &self.condition
+    }
 }
 
 // TODO: add types of table refs later
