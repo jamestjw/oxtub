@@ -116,9 +116,11 @@ pub fn evaluate_join_expression(
             eval_logic(logic_type, left_value, right_value)
         }
 
-        PlannedExpressionKind::Not(not_expression) => {
-            eval_not(evaluate_join_expression(&not_expression.expr, left_row, right_row)?)
-        }
+        PlannedExpressionKind::Not(not_expression) => eval_not(evaluate_join_expression(
+            &not_expression.expr,
+            left_row,
+            right_row,
+        )?),
         PlannedExpressionKind::Negate(NegateExpression { expr }) => {
             eval_negate(evaluate_join_expression(expr, left_row, right_row)?)
         }

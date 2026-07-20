@@ -35,7 +35,7 @@ impl ColumnRef {
     }
 }
 
-#[derive(Debug, Clone,PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BoundExpression {
     Literal(Value),
     Column(ColumnRef),
