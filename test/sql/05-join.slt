@@ -1,0 +1,67 @@
+# Create joined tables
+statement ok
+create table users(id int, name varchar(32));
+
+statement ok
+create table orders(user_id int, item varchar(32));
+
+query
+insert into users values (1, 'alice'), (2, 'bob'), (3, 'cara');
+----
+3
+
+query
+insert into orders values (1, 'book'), (1, 'pen'), (3, 'bag');
+----
+3
+
+# Inner join with duplicate matches
+query rowsort
+select users.id, users.name, orders.item from users join orders on users.id = orders.user_id;
+----
+1 alice book
+1 alice pen
+3 cara bag
+
+# Left join emits NULLs for unmatched outer rows
+query rowsort
+select users.id, users.name, orders.item from users left join orders on users.id = orders.user_id;
+----
+1 alice book
+1 alice pen
+2 bob NULL
+3 cara bag
+
+# Join aliases bind on both sides
+query rowsort
+select u.name, o.item from users u join orders o on u.id = o.user_id;
+----
+alice book
+alice pen
+cara bag
+
+# Non-equi predicates use both joined rows
+query rowsort
+select u.id, o.user_id from users u join orders o on u.id < o.user_id;
+----
+1 3
+2 3
+
+# Cross join produces the cartesian product
+query rowsort
+select users.id, orders.item from users cross join orders;
+----
+1 bag
+1 book
+1 pen
+2 bag
+2 book
+2 pen
+3 bag
+3 book
+3 pen
+
+# Inner join can produce no rows
+query rowsort
+select users.id, orders.item from users join orders on users.id = 99;
+----

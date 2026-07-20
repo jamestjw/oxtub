@@ -150,3 +150,213 @@ impl Executor for NestedLoopJoinExecutor<'_, '_, '_, '_> {
         self.output_schema
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::NamedTempFile;
+
+    use crate::{
+        buffer::bpm::BufferPoolManager,
+        catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
+        query::{
+            executor::{ExecutorContext, engine::ExecutorRow},
+            planner::{
+                expression::{
+                    ColumnValueExpression, ComparisonExpression, ComparisonType, ExpressionType,
+                    PlannedExpression, PlannedExpressionKind,
+                },
+                plan::{NestedLoopJoinPlan, PlanNode, PlanNodeKind, ValuesPlan},
+            },
+            table_ref::JoinType,
+        },
+        storage::disk::disk_manager::DiskManager,
+        types::value::Value,
+    };
+
+    use super::*;
+
+    struct MockExecutor {
+        schema: Schema,
+        rows: Vec<ExecutorRow>,
+        next_row_idx: usize,
+    }
+
+    impl MockExecutor {
+        fn new(schema: Schema, values: &[i32]) -> Self {
+            Self {
+                schema,
+                rows: values
+                    .iter()
+                    .map(|value| ExecutorRow {
+                        rid: None,
+                        values: vec![Value::Integer(*value)],
+                    })
+                    .collect(),
+                next_row_idx: 0,
+            }
+        }
+    }
+
+    impl Executor for MockExecutor {
+        fn init(&mut self) -> Result<(), ExecutionError> {
+            self.next_row_idx = 0;
+            Ok(())
+        }
+
+        fn next(&mut self, batch_size: usize) -> Result<Vec<ExecutorRow>, ExecutionError> {
+            let end = (self.next_row_idx + batch_size).min(self.rows.len());
+            let rows = self.rows[self.next_row_idx..end].to_vec();
+            self.next_row_idx = end;
+            Ok(rows)
+        }
+
+        fn output_schema(&self) -> &Schema {
+            &self.schema
+        }
+    }
+
+    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
+        BufferPoolManager::new(pool_size, disk_manager)
+    }
+
+    fn int_schema(name: &str) -> Schema {
+        Schema::new(&[Column::new_static(name.to_string(), SqlType::Integer)])
+    }
+
+    fn dummy_values_plan(output_schema: Schema) -> PlanNode {
+        PlanNode {
+            output_schema,
+            kind: PlanNodeKind::Values(ValuesPlan { rows: vec![] }),
+        }
+    }
+
+    fn int_col(tuple_idx: usize) -> PlannedExpression {
+        PlannedExpression {
+            return_type: ExpressionType {
+                sql_type: SqlType::Integer,
+                varchar_size: None,
+            },
+            kind: PlannedExpressionKind::ColumnValue(ColumnValueExpression {
+                tuple_idx,
+                col_idx: 0,
+            }),
+        }
+    }
+
+    fn eq_join_predicate() -> PlannedExpression {
+        PlannedExpression {
+            return_type: ExpressionType::new_bool(),
+            kind: PlannedExpressionKind::Comparison(ComparisonExpression {
+                left: Box::new(int_col(0)),
+                comparison_type: ComparisonType::Eq,
+                right: Box::new(int_col(1)),
+            }),
+        }
+    }
+
+    fn join_plan(
+        join_type: JoinType,
+        left_schema: Schema,
+        right_schema: Schema,
+    ) -> NestedLoopJoinPlan {
+        NestedLoopJoinPlan {
+            left: Box::new(dummy_values_plan(left_schema)),
+            right: Box::new(dummy_values_plan(right_schema)),
+            join_type,
+            predicate: Some(eq_join_predicate()),
+        }
+    }
+
+    fn collect_join_batches(
+        executor: &mut NestedLoopJoinExecutor<'_, '_, '_, '_>,
+        batch_size: usize,
+    ) -> Vec<Vec<ExecutorRow>> {
+        executor.init().unwrap();
+
+        let mut batches = vec![];
+        loop {
+            let batch = executor.next(batch_size).unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            batches.push(batch);
+        }
+
+        batches
+    }
+
+    fn joined_values(left: i32, right: Value) -> ExecutorRow {
+        ExecutorRow {
+            rid: None,
+            values: vec![Value::Integer(left), right],
+        }
+    }
+
+    #[test]
+    fn inner_join_resumes_buffered_inner_rows_across_batches() {
+        let bpm = setup_bpm(3);
+        let catalog = Catalog::new(&bpm);
+        let exec_ctx = ExecutorContext::new(&catalog);
+        let left_schema = int_schema("left_id");
+        let right_schema = int_schema("right_id");
+        let output_schema = Schema::new(&[
+            Column::new_static("left_id".to_string(), SqlType::Integer),
+            Column::new_static("right_id".to_string(), SqlType::Integer),
+        ]);
+        let plan = join_plan(JoinType::Inner, left_schema.clone(), right_schema.clone());
+        let mut executor = NestedLoopJoinExecutor::new(
+            &exec_ctx,
+            &plan,
+            &output_schema,
+            Box::new(MockExecutor::new(left_schema, &[1, 2])),
+            Box::new(MockExecutor::new(right_schema, &[1, 1, 2])),
+        );
+
+        let batches = collect_join_batches(&mut executor, 2);
+
+        assert_eq!(
+            batches,
+            vec![
+                vec![
+                    joined_values(1, Value::Integer(1)),
+                    joined_values(1, Value::Integer(1)),
+                ],
+                vec![joined_values(2, Value::Integer(2))],
+            ]
+        );
+    }
+
+    #[test]
+    fn left_join_emits_unmatched_outer_rows_across_batches() {
+        let bpm = setup_bpm(3);
+        let catalog = Catalog::new(&bpm);
+        let exec_ctx = ExecutorContext::new(&catalog);
+        let left_schema = int_schema("left_id");
+        let right_schema = int_schema("right_id");
+        let output_schema = Schema::new(&[
+            Column::new_static("left_id".to_string(), SqlType::Integer),
+            Column::new_static("right_id".to_string(), SqlType::Integer),
+        ]);
+        let plan = join_plan(JoinType::Left, left_schema.clone(), right_schema.clone());
+        let mut executor = NestedLoopJoinExecutor::new(
+            &exec_ctx,
+            &plan,
+            &output_schema,
+            Box::new(MockExecutor::new(left_schema, &[1, 2, 3])),
+            Box::new(MockExecutor::new(right_schema, &[1, 3])),
+        );
+
+        let batches = collect_join_batches(&mut executor, 1);
+
+        assert_eq!(
+            batches,
+            vec![
+                vec![joined_values(1, Value::Integer(1))],
+                vec![joined_values(2, Value::Null(SqlType::Integer))],
+                vec![joined_values(3, Value::Integer(3))],
+            ]
+        );
+    }
+}
