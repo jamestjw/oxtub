@@ -1251,14 +1251,12 @@ impl<'a, K: bytemuck::Pod + Copy, C: KeyComparator<K>, const TOMB_CAP: usize>
 
 #[cfg(test)]
 mod tests {
-    use std::{cmp::Ordering, path::PathBuf, sync::Arc};
-
-    use tempfile::NamedTempFile;
+    use std::{cmp::Ordering, sync::Arc};
 
     use super::*;
-    use crate::storage::{
-        disk::disk_manager::DiskManager,
-        index::generic_key::{GenericKey, GenericKeyComparator},
+    use crate::{
+        storage::index::generic_key::{GenericKey, GenericKeyComparator},
+        testing::setup_bpm,
     };
 
     struct U64Comparator;
@@ -1275,12 +1273,6 @@ mod tests {
         fn compare(&self, a: &i64, b: &i64) -> Ordering {
             a.cmp(b)
         }
-    }
-
-    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(PathBuf::from(file.path())).unwrap();
-        BufferPoolManager::new(pool_size, disk_manager)
     }
 
     fn rid_for_key(key: u64) -> Rid {

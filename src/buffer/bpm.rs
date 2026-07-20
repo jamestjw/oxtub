@@ -340,17 +340,10 @@ mod tests {
         time::Duration,
     };
 
-    use tempfile::NamedTempFile;
-
     use super::*;
+    use crate::testing::setup_bpm;
 
     const FRAMES: usize = 10;
-
-    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
-        BufferPoolManager::new(pool_size, disk_manager)
-    }
 
     fn copy_string(dest: &mut [u8], src: &str) {
         assert!(src.len() + 1 <= dest.len());

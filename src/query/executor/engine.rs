@@ -139,24 +139,15 @@ impl<'catalog, 'bpm> ExecutionEngine<'catalog, 'bpm> {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::NamedTempFile;
-
     use crate::{
-        buffer::bpm::BufferPoolManager,
         catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
         query::{binder::transformer::Binder, parser::parse_sql, planner::transformer::Planner},
-        storage::disk::disk_manager::DiskManager,
         storage::table::tuple::Tuple,
+        testing::setup_bpm,
         types::value::Value,
     };
 
     use super::*;
-
-    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
-        BufferPoolManager::new(pool_size, disk_manager)
-    }
 
     fn create_users_table(catalog: &mut Catalog<'_>) {
         create_table(catalog, "users");

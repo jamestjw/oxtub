@@ -5,6 +5,8 @@ mod catalog;
 mod common;
 mod query;
 mod storage;
+#[cfg(test)]
+mod testing;
 mod types;
 
 fn main() {

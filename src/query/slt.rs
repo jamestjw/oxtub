@@ -1,5 +1,3 @@
-use tempfile::NamedTempFile;
-
 use crate::{
     buffer::bpm::BufferPoolManager,
     catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
@@ -7,10 +5,8 @@ use crate::{
         engine::{QueryEngine, QueryResult},
         executor::engine::ExecutionResult,
     },
-    storage::{
-        disk::disk_manager::DiskManager,
-        table::tuple::{Tuple, TupleMeta},
-    },
+    storage::table::tuple::{Tuple, TupleMeta},
+    testing::setup_bpm,
     types::value::Value,
 };
 
@@ -24,12 +20,6 @@ enum SltRecord {
     StatementOk {
         sql: String,
     },
-}
-
-fn setup_bpm(pool_size: usize) -> BufferPoolManager {
-    let file = NamedTempFile::new().unwrap();
-    let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
-    BufferPoolManager::new(pool_size, disk_manager)
 }
 
 fn setup_seqscan_catalog<'bpm>(bpm: &'bpm BufferPoolManager) -> Catalog<'bpm> {

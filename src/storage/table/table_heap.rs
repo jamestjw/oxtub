@@ -151,22 +151,13 @@ impl<'a> Iterator for TableHeapIterator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::NamedTempFile;
-
     use crate::{
-        buffer::bpm::BufferPoolManager,
         catalog::{column::Column, schema::Schema, types::SqlType},
-        storage::disk::disk_manager::DiskManager,
+        testing::setup_bpm,
         types::value::Value,
     };
 
     use super::*;
-
-    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
-        BufferPoolManager::new(pool_size, disk_manager)
-    }
 
     #[test]
     fn insert_and_get_tuples_across_multiple_pages() {

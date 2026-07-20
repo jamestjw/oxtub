@@ -554,24 +554,16 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use tempfile::NamedTempFile;
 
     use crate::{
-        buffer::bpm::BufferPoolManager,
         catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
         query::{
             binder::statement::BoundStatement, binder::transformer::Binder, parser::parse_sql,
         },
-        storage::disk::disk_manager::DiskManager,
+        testing::setup_bpm,
     };
 
     use super::*;
-
-    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
-        BufferPoolManager::new(pool_size, disk_manager)
-    }
 
     fn create_users_table(catalog: &mut Catalog<'_>) {
         let schema = Schema::new(&[

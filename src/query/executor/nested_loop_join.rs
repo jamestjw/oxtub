@@ -153,10 +153,7 @@ impl Executor for NestedLoopJoinExecutor<'_, '_, '_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::NamedTempFile;
-
     use crate::{
-        buffer::bpm::BufferPoolManager,
         catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
         query::{
             executor::{ExecutorContext, engine::ExecutorRow},
@@ -169,7 +166,7 @@ mod tests {
             },
             table_ref::JoinType,
         },
-        storage::disk::disk_manager::DiskManager,
+        testing::setup_bpm,
         types::value::Value,
     };
 
@@ -213,12 +210,6 @@ mod tests {
         fn output_schema(&self) -> &Schema {
             &self.schema
         }
-    }
-
-    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
-        BufferPoolManager::new(pool_size, disk_manager)
     }
 
     fn int_schema(name: &str) -> Schema {

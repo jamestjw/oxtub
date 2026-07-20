@@ -167,10 +167,8 @@ impl<'catalog, 'bpm> Optimizer<'catalog, 'bpm> {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use tempfile::NamedTempFile;
 
     use crate::{
-        buffer::bpm::BufferPoolManager,
         catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
         query::{
             binder::transformer::Binder,
@@ -178,14 +176,8 @@ mod tests {
             parser::parse_sql,
             planner::{plan::PlanNodeKind, transformer::Planner},
         },
-        storage::disk::disk_manager::DiskManager,
+        testing::setup_bpm,
     };
-
-    fn setup_bpm(pool_size: usize) -> BufferPoolManager {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path().to_path_buf()).unwrap();
-        BufferPoolManager::new(pool_size, disk_manager)
-    }
 
     fn create_users_table(catalog: &mut Catalog<'_>) {
         let schema = Schema::new(&[
