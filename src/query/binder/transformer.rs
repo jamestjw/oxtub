@@ -7,15 +7,15 @@ use crate::{
             error::BinderError,
             expression::{BoundExpression, ColumnRef, are_column_refs_unique},
             statement::{
-                BoundCreateTable, BoundDelete, BoundInsert, BoundInsertSource, BoundSelect,
-                BoundStatement, BoundUpdate,
+                BoundCreateTable, BoundDelete, BoundExplain, BoundInsert, BoundInsertSource,
+                BoundSelect, BoundStatement, BoundUpdate,
             },
             table_ref::{BoundBaseTableRef, BoundExpressionListRef, BoundJoin, BoundTableRef},
         },
         expression::{ColumnQualifier, Expression, ParsedColumnRef},
         statement::{
-            CreateColumn, CreateTableStatement, DeleteStatement, InsertSource, InsertStatement,
-            SelectItem, SelectStatement, Statement, UpdateStatement,
+            CreateColumn, CreateTableStatement, DeleteStatement, ExplainStatement, InsertSource,
+            InsertStatement, SelectItem, SelectStatement, Statement, UpdateStatement,
         },
         table_ref::TableRef as ParsedTableRef,
     },
@@ -80,10 +80,20 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
             Statement::Insert(insert_statement) => self.bind_insert(insert_statement),
             Statement::Update(update_statement) => self.bind_update(update_statement),
             Statement::Delete(delete_statement) => self.bind_delete(delete_statement),
+            Statement::Explain(explain_statement) => self.bind_explain(explain_statement),
             Statement::CreateTable(create_table_statement) => {
                 self.bind_create_tbl(create_table_statement)
             }
         }
+    }
+
+    fn bind_explain(&self, stmt: ExplainStatement) -> Result<BoundStatement, BinderError> {
+        let statement = self.bind_statement(*stmt.statement)?;
+
+        Ok(BoundStatement::Explain(BoundExplain {
+            raw: stmt.raw,
+            statement: Box::new(statement),
+        }))
     }
 
     fn bind_update(&self, stmt: UpdateStatement) -> Result<BoundStatement, BinderError> {

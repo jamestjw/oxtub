@@ -1,19 +1,22 @@
 use thiserror::Error;
 
 use crate::{
-    catalog::{error::CatalogError, manager::Catalog, schema::Schema},
+    catalog::{
+        column::Column, error::CatalogError, manager::Catalog, schema::Schema, types::SqlType,
+    },
     query::{
         binder::{
             error::BinderError,
-            statement::{BoundCreateTable, BoundStatement},
+            statement::{BoundCreateTable, BoundExplain, BoundStatement},
             transformer::Binder,
         },
         error::QueryError,
-        executor::{ExecutionEngine, engine::ExecutionResult, error::ExecutionError},
+        executor::{ExecutionEngine, ExecutorRow, engine::ExecutionResult, error::ExecutionError},
         optimizer::Optimizer,
         parser::parse_sql,
-        planner::{error::PlannerError, transformer::Planner},
+        planner::{error::PlannerError, format::format_plan, transformer::Planner},
     },
+    types::value::Value,
 };
 
 const DEFAULT_BATCH_SIZE: usize = 128;
@@ -68,6 +71,7 @@ impl<'catalog, 'bpm> QueryEngine<'catalog, 'bpm> {
 
         match bound_statement {
             BoundStatement::CreateTable(create_table) => self.execute_create_table(create_table),
+            BoundStatement::Explain(explain) => self.execute_explain(explain),
             BoundStatement::Select(_)
             | BoundStatement::Insert(_)
             | BoundStatement::Update(_)
@@ -80,11 +84,48 @@ impl<'catalog, 'bpm> QueryEngine<'catalog, 'bpm> {
                     execution_engine.execute(plan, batch_size)?,
                 ))
             }
-            BoundStatement::Explain(_)
-            | BoundStatement::CreateIndex(_)
+            BoundStatement::CreateIndex(_)
             | BoundStatement::DropTable(_)
             | BoundStatement::DropIndex(_) => Err(QueryEngineError::UnsupportedStatement),
         }
+    }
+
+    fn execute_explain(
+        &self,
+        BoundExplain { raw, statement }: BoundExplain,
+    ) -> Result<QueryResult, QueryEngineError> {
+        let statement = *statement;
+        let plan = match statement {
+            BoundStatement::Select(_)
+            | BoundStatement::Insert(_)
+            | BoundStatement::Update(_)
+            | BoundStatement::Delete(_) => Planner::new(self.catalog).plan_statement(statement)?,
+            BoundStatement::Explain(_)
+            | BoundStatement::CreateTable(_)
+            | BoundStatement::CreateIndex(_)
+            | BoundStatement::DropTable(_)
+            | BoundStatement::DropIndex(_) => return Err(QueryEngineError::UnsupportedStatement),
+        };
+
+        let plan = if raw {
+            plan
+        } else {
+            Optimizer::new(self.catalog).optimize(&plan)
+        };
+        let plan = format_plan(&plan);
+        let schema = Schema::new(&[Column::new_variable(
+            "QUERY PLAN".to_string(),
+            SqlType::Varchar,
+            plan.len(),
+        )]);
+
+        Ok(QueryResult::Rows(ExecutionResult {
+            schema,
+            rows: vec![ExecutorRow {
+                rid: None,
+                values: vec![Value::Varchar(plan)],
+            }],
+        }))
     }
 
     fn execute_create_table(
@@ -119,5 +160,67 @@ impl<'catalog, 'bpm> QueryEngine<'catalog, 'bpm> {
         Ok(QueryResult::Command {
             tag: String::from("CREATE TABLE"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        catalog::manager::Catalog,
+        query::{engine::QueryEngine, engine::QueryResult},
+        testing::setup_bpm,
+        types::value::Value,
+    };
+
+    fn setup_engine<'catalog, 'bpm>(
+        catalog: &'catalog mut Catalog<'bpm>,
+    ) -> QueryEngine<'catalog, 'bpm> {
+        let mut engine = QueryEngine::new(catalog);
+        engine
+            .execute_sql("create table users(id int, name varchar(32));")
+            .unwrap();
+        engine
+    }
+
+    fn explain_plan(engine: &mut QueryEngine<'_, '_>, sql: &str) -> String {
+        let QueryResult::Rows(result) = engine.execute_sql(sql).unwrap() else {
+            panic!("EXPLAIN should return rows");
+        };
+        let Value::Varchar(plan) = &result.rows[0].values[0] else {
+            panic!("EXPLAIN should return a VARCHAR plan");
+        };
+
+        plan.clone()
+    }
+
+    #[test]
+    fn explain_returns_optimized_plan_by_default() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        let mut engine = setup_engine(&mut catalog);
+
+        let plan = explain_plan(
+            &mut engine,
+            "explain select id, name from users where id = 1",
+        );
+
+        assert!(plan.contains("SeqScan table=users filter=(#0.0 = 1)"));
+        assert!(!plan.contains("Filter predicate="));
+    }
+
+    #[test]
+    fn explain_raw_returns_unoptimized_plan() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        let mut engine = setup_engine(&mut catalog);
+
+        let plan = explain_plan(
+            &mut engine,
+            "explain (raw) select id, name from users where id = 1",
+        );
+
+        assert!(plan.contains("Filter predicate=(#0.0 = 1)"));
+        assert!(plan.contains("SeqScan table=users"));
+        assert!(!plan.contains("SeqScan table=users filter="));
     }
 }

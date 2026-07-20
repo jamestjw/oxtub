@@ -16,8 +16,8 @@ use crate::{
         error::QueryError,
         expression::{BinaryOperator, ColumnQualifier, Expression, ParsedColumnRef, UnaryOperator},
         statement::{
-            CreateColumn, CreateTableStatement, DeleteStatement, InsertSource, InsertStatement,
-            SelectItem, SelectStatement, Statement, UpdateStatement,
+            CreateColumn, CreateTableStatement, DeleteStatement, ExplainStatement, InsertSource,
+            InsertStatement, SelectItem, SelectStatement, Statement, UpdateStatement,
         },
         table_ref::{JoinType, TableRef},
     },
@@ -39,11 +39,61 @@ fn convert_statement(statement: SqlStatement) -> Result<Statement, QueryError> {
         SqlStatement::Insert(insert) => convert_insert(insert),
         SqlStatement::Update(update) => convert_update(update),
         SqlStatement::Delete(delete) => convert_delete(delete),
+        SqlStatement::Explain {
+            analyze,
+            verbose,
+            query_plan,
+            estimate,
+            statement,
+            format,
+            options,
+            ..
+        } => convert_explain(
+            analyze, verbose, query_plan, estimate, statement, format, options,
+        ),
         SqlStatement::CreateTable(create) => convert_create_table(create),
         _ => Err(QueryError::UnsupportedStatement(
-            "only SELECT, INSERT, UPDATE, DELETE, and CREATE TABLE are supported",
+            "only SELECT, INSERT, UPDATE, DELETE, EXPLAIN, and CREATE TABLE are supported",
         )),
     }
+}
+
+fn convert_explain(
+    analyze: bool,
+    verbose: bool,
+    query_plan: bool,
+    estimate: bool,
+    statement: Box<SqlStatement>,
+    format: Option<sqlparser::ast::AnalyzeFormatKind>,
+    options: Option<Vec<sqlparser::ast::UtilityOption>>,
+) -> Result<Statement, QueryError> {
+    if analyze || verbose || query_plan || estimate || format.is_some() {
+        return Err(QueryError::UnsupportedStatement(
+            "only plain EXPLAIN and EXPLAIN (RAW) are supported",
+        ));
+    }
+
+    let mut raw = false;
+    for option in options.unwrap_or_default() {
+        if option.arg.is_some() {
+            return Err(QueryError::UnsupportedStatement(
+                "EXPLAIN options with values are not supported",
+            ));
+        }
+
+        if option.name.value.eq_ignore_ascii_case("raw") && !raw {
+            raw = true;
+        } else {
+            return Err(QueryError::UnsupportedStatement(
+                "only EXPLAIN (RAW) is supported",
+            ));
+        }
+    }
+
+    Ok(Statement::Explain(ExplainStatement {
+        raw,
+        statement: Box::new(convert_statement(*statement)?),
+    }))
 }
 
 fn convert_query(query: Query) -> Result<Statement, QueryError> {
@@ -1097,6 +1147,38 @@ mod tests {
                 },
             )"#]]
         .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn parses_explain() {
+        let statement = parse_sql("explain select * from users").unwrap();
+
+        assert!(matches!(
+            statement,
+            Statement::Explain(ExplainStatement { raw: false, .. })
+        ));
+    }
+
+    #[test]
+    fn parses_explain_raw() {
+        let statement = parse_sql("explain (raw) select * from users").unwrap();
+
+        assert!(matches!(
+            statement,
+            Statement::Explain(ExplainStatement { raw: true, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_explain_options() {
+        let err = parse_sql("explain (analyze) select * from users").unwrap_err();
+        assert!(matches!(err, QueryError::UnsupportedStatement(_)));
+
+        let err = parse_sql("explain analyze select * from users").unwrap_err();
+        assert!(matches!(err, QueryError::UnsupportedStatement(_)));
+
+        let err = parse_sql("explain (raw true) select * from users").unwrap_err();
+        assert!(matches!(err, QueryError::UnsupportedStatement(_)));
     }
 
     #[test]

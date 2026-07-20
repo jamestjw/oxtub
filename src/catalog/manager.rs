@@ -76,6 +76,10 @@ impl<'a> Catalog<'a> {
         }
     }
 
+    pub fn table_names(&self) -> Vec<&str> {
+        self.table_names.keys().map(String::as_str).collect()
+    }
+
     pub fn create_index(
         &mut self,
         index_name: String,

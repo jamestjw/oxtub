@@ -9,7 +9,14 @@ pub enum Statement {
     Insert(InsertStatement),
     Update(UpdateStatement),
     Delete(DeleteStatement),
+    Explain(ExplainStatement),
     CreateTable(CreateTableStatement),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExplainStatement {
+    pub raw: bool,
+    pub statement: Box<Statement>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

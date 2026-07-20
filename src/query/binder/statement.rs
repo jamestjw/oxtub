@@ -53,7 +53,10 @@ pub struct BoundDelete {
 }
 
 #[derive(Debug)]
-pub struct BoundExplain;
+pub struct BoundExplain {
+    pub raw: bool,
+    pub statement: Box<BoundStatement>,
+}
 
 #[derive(Debug)]
 pub struct BoundCreateTable {

@@ -4,6 +4,7 @@ mod buffer;
 mod catalog;
 mod common;
 mod query;
+mod repl;
 mod storage;
 #[cfg(test)]
 mod testing;
@@ -11,5 +12,8 @@ mod types;
 
 fn main() {
     tracing_subscriber::fmt::init();
-    tracing::info!("starting oxtub");
+
+    if let Err(err) = repl::run() {
+        eprintln!("error: {err}");
+    }
 }
