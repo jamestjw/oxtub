@@ -1,5 +1,5 @@
 use crate::{
-    catalog::{column::Column, schema::Schema, table::TableId},
+    catalog::{column::Column, index::IndexId, schema::Schema, table::TableId},
     query::{
         binder::table_ref::BoundBaseTableRef, planner::expression::PlannedExpression,
         table_ref::JoinType,
@@ -76,6 +76,17 @@ impl PlanNode {
                     predicate: nested_loop_join_plan.predicate.clone(),
                 })
             }
+            PlanNodeKind::NestedIndexJoin(nested_index_join_plan) if children.len() == 1 => {
+                PlanNodeKind::NestedIndexJoin(NestedIndexJoinPlan {
+                    child: Box::new(children.pop().unwrap()),
+                    predicate_expressions: nested_index_join_plan.predicate_expressions.clone(),
+                    inner_table_oid: nested_index_join_plan.inner_table_oid,
+                    inner_table_index_oid: nested_index_join_plan.inner_table_index_oid,
+                    inner_table_index_name: nested_index_join_plan.inner_table_index_name.clone(),
+                    inner_table_schema: nested_index_join_plan.inner_table_schema.clone(),
+                    join_type: nested_index_join_plan.join_type,
+                })
+            }
             _ => panic!("unexpected shape"),
         };
 
@@ -101,6 +112,9 @@ impl PlanNode {
                     nested_loop_join_plan.right.as_ref(),
                 ]
             }
+            PlanNodeKind::NestedIndexJoin(nested_index_join_plan) => {
+                vec![nested_index_join_plan.child.as_ref()]
+            }
         }
     }
 }
@@ -116,6 +130,7 @@ pub enum PlanNodeKind {
     Update(UpdatePlan),
     Delete(DeletePlan),
     NestedLoopJoin(NestedLoopJoinPlan),
+    NestedIndexJoin(NestedIndexJoinPlan),
 }
 
 #[derive(Debug, Clone)]
@@ -230,4 +245,20 @@ impl NestedLoopJoinPlan {
         columns.extend_from_slice(right.output_schema().columns());
         Schema::new(&columns)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct NestedIndexJoinPlan {
+    // outer table of the index join
+    pub child: Box<PlanNode>,
+    // Expressions of the outer table that need to match the index of the inner table.
+    // Vec as we could be using a composite index
+    pub predicate_expressions: Vec<PlannedExpression>,
+    pub inner_table_oid: TableId,
+    pub inner_table_index_oid: IndexId,
+    pub inner_table_index_name: String,
+    // TODO: verify if schema is needed
+    pub inner_table_schema: Schema,
+    pub join_type: JoinType,
+    // TODO: we should also support joins that use more than indexed columns
 }

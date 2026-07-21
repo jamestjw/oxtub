@@ -87,6 +87,16 @@ fn format_plan_node(plan: &PlanNode, indent: usize, out: &mut String) {
             format_plan_node(&nlj.left, indent + 1, out);
             format_plan_node(&nlj.right, indent + 1, out);
         }
+        PlanNodeKind::NestedIndexJoin(nij) => {
+            // TODO: include predicate/index details once NestedIndexJoin is fully planned.
+            let _ = writeln!(
+                out,
+                "NestedIndexJoin type={} index={}",
+                format_join_type(nij.join_type),
+                nij.inner_table_index_name
+            );
+            format_plan_node(&nij.child, indent + 1, out);
+        }
     }
 }
 

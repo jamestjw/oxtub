@@ -133,6 +133,9 @@ impl<'catalog, 'bpm> ExecutionEngine<'catalog, 'bpm> {
                     right_child,
                 )))
             }
+            PlanNodeKind::NestedIndexJoin(_) => {
+                todo!("TODO: create nested index join executor")
+            }
         }
     }
 }
