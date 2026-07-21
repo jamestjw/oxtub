@@ -23,6 +23,15 @@ select users.id, users.name, orders.item from users join orders on users.id = or
 1 alice pen
 3 cara bag
 
+# Inner join optimized plan
+query
+explain select users.id, users.name, orders.item from users join orders on users.id = orders.user_id;
+----
+Projection exprs=[#0.0, #0.1, #0.3]
+  NestedLoopJoin type=inner predicate=(#0.0 = #1.0)
+    SeqScan table=users
+    SeqScan table=orders
+
 # Left join emits NULLs for unmatched outer rows
 query rowsort
 select users.id, users.name, orders.item from users left join orders on users.id = orders.user_id;
@@ -31,6 +40,15 @@ select users.id, users.name, orders.item from users left join orders on users.id
 1 alice pen
 2 bob NULL
 3 cara bag
+
+# Left join optimized plan
+query
+explain select users.id, users.name, orders.item from users left join orders on users.id = orders.user_id;
+----
+Projection exprs=[#0.0, #0.1, #0.3]
+  NestedLoopJoin type=left predicate=(#0.0 = #1.0)
+    SeqScan table=users
+    SeqScan table=orders
 
 # Join aliases bind on both sides
 query rowsort
@@ -60,6 +78,15 @@ select users.id, orders.item from users cross join orders;
 3 bag
 3 book
 3 pen
+
+# Cross join optimized plan
+query
+explain select users.id, orders.item from users cross join orders;
+----
+Projection exprs=[#0.0, #0.3]
+  NestedLoopJoin type=cross
+    SeqScan table=users
+    SeqScan table=orders
 
 # Inner join can produce no rows
 query rowsort

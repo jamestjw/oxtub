@@ -17,7 +17,8 @@ use crate::{
 pub fn format_plan(plan: &PlanNode) -> String {
     let mut out = String::new();
     format_plan_node(plan, 0, &mut out);
-    out
+    // Keep multiline plans easy to assert in SLT files by omitting the final newline.
+    out.trim_end_matches('\n').to_string()
 }
 
 fn format_plan_node(plan: &PlanNode, indent: usize, out: &mut String) {
