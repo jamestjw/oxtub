@@ -1,0 +1,38 @@
+statement ok
+create table users(id int, name varchar(32));
+
+statement ok
+create table orders(user_id int primary key, item varchar(32));
+
+query
+explain select users.id, users.name, orders.item
+from users join orders on users.id = orders.user_id;
+----
+Projection exprs=[#0.0, #0.1, #0.3]
+  NestedIndexJoin type=inner index=orders_pk
+    SeqScan table=users
+
+query
+explain select users.id, users.name, orders.item
+from users left join orders on users.id = orders.user_id;
+----
+Projection exprs=[#0.0, #0.1, #0.3]
+  NestedIndexJoin type=left index=orders_pk
+    SeqScan table=users
+
+# Left-side indexes are intentionally not used yet because that would require
+# preserving original join output ordering while probing the original left table.
+statement ok
+create table indexed_users(id int primary key, name varchar(32));
+
+statement ok
+create table plain_orders(user_id int, item varchar(32));
+
+query
+explain select indexed_users.id, indexed_users.name, plain_orders.item
+from indexed_users join plain_orders on indexed_users.id = plain_orders.user_id;
+----
+Projection exprs=[#0.0, #0.1, #0.3]
+  NestedLoopJoin type=inner predicate=(#0.0 = #1.0)
+    SeqScan table=indexed_users
+    SeqScan table=plain_orders

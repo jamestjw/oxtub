@@ -208,3 +208,7 @@ slt_test!(insert_slt, "../../test/sql/02-insert.slt");
 slt_test!(update_slt, "../../test/sql/03-update.slt");
 slt_test!(delete_slt, "../../test/sql/04-delete.slt");
 slt_test!(join_slt, "../../test/sql/05-join.slt");
+slt_test!(
+    nested_index_join_slt,
+    "../../test/sql/06-nested-index-join.slt"
+);
