@@ -79,7 +79,7 @@ impl PlanNode {
             PlanNodeKind::NestedIndexJoin(nested_index_join_plan) if children.len() == 1 => {
                 PlanNodeKind::NestedIndexJoin(NestedIndexJoinPlan {
                     child: Box::new(children.pop().unwrap()),
-                    predicate_expressions: nested_index_join_plan.predicate_expressions.clone(),
+                    index_expressions: nested_index_join_plan.index_expressions.clone(),
                     inner_table_oid: nested_index_join_plan.inner_table_oid,
                     inner_table_index_oid: nested_index_join_plan.inner_table_index_oid,
                     inner_table_index_name: nested_index_join_plan.inner_table_index_name.clone(),
@@ -253,7 +253,7 @@ pub struct NestedIndexJoinPlan {
     pub child: Box<PlanNode>,
     // Expressions of the outer table that need to match the index of the inner table.
     // Vec as we could be using a composite index
-    pub predicate_expressions: Vec<PlannedExpression>,
+    pub index_expressions: Vec<PlannedExpression>,
     pub inner_table_oid: TableId,
     pub inner_table_index_oid: IndexId,
     pub inner_table_index_name: String,

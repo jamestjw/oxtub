@@ -17,4 +17,8 @@ impl<'a> IndexInfo<'a> {
             index,
         }
     }
+
+    pub fn oid(&self) -> IndexId {
+        self.index_oid
+    }
 }

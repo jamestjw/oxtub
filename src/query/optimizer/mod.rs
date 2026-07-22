@@ -1,8 +1,17 @@
 use crate::{
-    catalog::{index::IndexId, manager::Catalog},
-    query::planner::{
-        expression::{ColumnValueExpression, PlannedExpression, PlannedExpressionKind},
-        plan::{FilterPlan, PlanNode, PlanNodeKind, ProjectionPlan, SeqScanPlan},
+    catalog::{index::IndexId, manager::Catalog, schema::Schema},
+    query::{
+        planner::{
+            expression::{
+                ColumnValueExpression, ComparisonExpression, ComparisonType, ExpressionType,
+                LogicExpression, LogicType, PlannedExpression, PlannedExpressionKind,
+            },
+            plan::{
+                FilterPlan, NestedIndexJoinPlan, NestedLoopJoinPlan, PlanNode, PlanNodeKind,
+                ProjectionPlan, SeqScanPlan,
+            },
+        },
+        table_ref::JoinType,
     },
 };
 
@@ -13,6 +22,19 @@ pub struct Optimizer<'catalog, 'bpm> {
 impl<'catalog, 'bpm> Optimizer<'catalog, 'bpm> {
     pub fn new(catalog: &'catalog Catalog<'bpm>) -> Self {
         Self { catalog }
+    }
+
+    fn build_index_expressions(schema: &Schema, col_idxs: &[usize]) -> Vec<PlannedExpression> {
+        col_idxs
+            .iter()
+            .map(|col_idx| PlannedExpression {
+                return_type: ExpressionType::from_column(&schema.columns()[*col_idx]),
+                kind: PlannedExpressionKind::ColumnValue(ColumnValueExpression {
+                    tuple_idx: 0,
+                    col_idx: *col_idx,
+                }),
+            })
+            .collect()
     }
 
     pub fn optimize(&self, plan: &PlanNode) -> PlanNode {
@@ -84,7 +106,140 @@ impl<'catalog, 'bpm> Optimizer<'catalog, 'bpm> {
     }
 
     fn optimize_nlj_as_index_join(&self, plan: &PlanNode) -> PlanNode {
-        plan.clone()
+        let optimized_children = plan
+            .children()
+            .into_iter()
+            .map(|child| self.optimize_nlj_as_index_join(child))
+            .collect::<Vec<_>>();
+        let optimized_plan = plan.clone_with_children(optimized_children);
+
+        match &optimized_plan.kind {
+            PlanNodeKind::NestedLoopJoin(NestedLoopJoinPlan {
+                left: left_plan,
+                right: right_plan,
+                join_type: join_type @ (JoinType::Left | JoinType::Inner),
+                predicate: Some(predicate),
+            }) => {
+                // only works if both children are SeqScans
+                match (&left_plan.kind, &right_plan.kind) {
+                    (
+                        PlanNodeKind::SeqScan(SeqScanPlan {
+                            filter_predicate: left_filter_predicate,
+                            table_name: left_table_name,
+                            table_oid: left_table_oid,
+                        }),
+                        PlanNodeKind::SeqScan(SeqScanPlan {
+                            filter_predicate: right_filter_predicate,
+                            table_name: right_table_name,
+                            table_oid: right_table_oid,
+                        }),
+                    ) => {
+                        let Some((left_col_idxs, right_col_idxs)) =
+                            Self::extract_index_exprs_for_index_join_predicate(predicate)
+                        else {
+                            return optimized_plan;
+                        };
+
+                        // TODO: if we only have indexes on a subset of these columns, it should
+                        // still be possible to do an index join!
+
+                        // TODO: also support using an index on the left table without changing
+                        // the join output schema/order.
+                        let Some((right_index_oid, right_index_name)) =
+                            self.matches_index_of_tbl(right_table_name, &right_col_idxs)
+                        else {
+                            return optimized_plan;
+                        };
+
+                        let index_expressions = Self::build_index_expressions(
+                            left_plan.output_schema(),
+                            &left_col_idxs,
+                        );
+
+                        PlanNode {
+                            output_schema: optimized_plan.output_schema().clone(),
+                            kind: PlanNodeKind::NestedIndexJoin(NestedIndexJoinPlan {
+                                child: Box::new(left_plan.as_ref().clone()),
+                                index_expressions,
+                                inner_table_oid: *right_table_oid,
+                                inner_table_index_oid: right_index_oid,
+                                inner_table_index_name: right_index_name,
+                                inner_table_schema: right_plan.output_schema().clone(),
+                                join_type: *join_type,
+                            }),
+                        }
+                    }
+                    _ => optimized_plan,
+                }
+            }
+            _ => optimized_plan,
+        }
+    }
+
+    fn extract_index_exprs_for_index_join_predicate(
+        predicate: &PlannedExpression,
+    ) -> Option<(Vec<usize>, Vec<usize>)> {
+        // TODO: we can actually support a wider range of expressions e.g. we could gather the CVE
+        // from the tables, and then evaluate the remaining predicates separately in the executor.
+        match &predicate.kind {
+            PlannedExpressionKind::Comparison(ComparisonExpression {
+                left,
+                comparison_type: ComparisonType::Eq,
+                right,
+            }) => match (&left.kind, &right.kind) {
+                (
+                    PlannedExpressionKind::ColumnValue(ColumnValueExpression {
+                        tuple_idx: left_tuple_idx,
+                        col_idx: left_col_idx,
+                    }),
+                    PlannedExpressionKind::ColumnValue(ColumnValueExpression {
+                        tuple_idx: right_tuple_idx,
+                        col_idx: right_col_idx,
+                    }),
+                ) => {
+                    // Ensure that the CVE from the left plan is on the left, tolerate inversions
+                    let (left_col_idx, right_col_idx) = match (*left_tuple_idx, *right_tuple_idx) {
+                        (0, 1) => (left_col_idx, right_col_idx),
+                        (1, 0) => (right_col_idx, left_col_idx),
+                        _ => return None,
+                    };
+                    Some((vec![*left_col_idx], vec![*right_col_idx]))
+                }
+                _ => None,
+            },
+            PlannedExpressionKind::Logic(LogicExpression {
+                left,
+                logic_type: LogicType::And,
+                right,
+            }) => {
+                match (
+                    Self::extract_index_exprs_for_index_join_predicate(left),
+                    Self::extract_index_exprs_for_index_join_predicate(right),
+                ) {
+                    (Some((left1, right1)), Some((left2, right2))) => Some((
+                        [left1.as_slice(), left2.as_slice()].concat(),
+                        [right1.as_slice(), right2.as_slice()].concat(),
+                    )),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn matches_index_of_tbl(
+        &self,
+        table_name: &str,
+        col_idxes: &[usize],
+    ) -> Option<(IndexId, String)> {
+        match self.catalog.get_table_indexes(table_name) {
+            // This should never error in reality
+            Err(_) => None,
+            Ok(index_infos) => index_infos
+                .iter()
+                .find(|info| info.index.metadata().key_attrs == col_idxes)
+                .map(|info| (info.oid(), info.index.metadata().name.clone())),
+        }
     }
 
     fn optimize_eliminate_true_filter(&self, plan: &PlanNode) -> PlanNode {
