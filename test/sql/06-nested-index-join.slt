@@ -2,14 +2,25 @@ statement ok
 create table users(id int, name varchar(32));
 
 statement ok
-create table orders(user_id int primary key, item varchar(32));
+create table orders(user_id int, item varchar(32));
+
+statement ok
+create index idx_orders_user_id on orders(user_id);
 
 query
 explain select users.id, users.name, orders.item
 from users join orders on users.id = orders.user_id;
 ----
 Projection exprs=[#0.0, #0.1, #0.3]
-  NestedIndexJoin type=inner index=orders_pk
+  NestedIndexJoin type=inner index=idx_orders_user_id
+    SeqScan table=users
+
+query
+explain select users.id, users.name, orders.item
+from users join orders on orders.user_id = users.id;
+----
+Projection exprs=[#0.0, #0.1, #0.3]
+  NestedIndexJoin type=inner index=idx_orders_user_id
     SeqScan table=users
 
 query
@@ -17,13 +28,45 @@ explain select users.id, users.name, orders.item
 from users left join orders on users.id = orders.user_id;
 ----
 Projection exprs=[#0.0, #0.1, #0.3]
-  NestedIndexJoin type=left index=orders_pk
+  NestedIndexJoin type=left index=idx_orders_user_id
     SeqScan table=users
+
+statement ok
+create table composite_users(tenant_id int, id int, name varchar(32));
+
+statement ok
+create table composite_orders(tenant_id int, user_id int, item varchar(32));
+
+statement ok
+create index idx_composite_orders_user on composite_orders(tenant_id, user_id);
+
+query
+explain select composite_users.tenant_id, composite_users.id, composite_orders.item
+from composite_users join composite_orders
+on composite_users.tenant_id = composite_orders.tenant_id
+and composite_users.id = composite_orders.user_id;
+----
+Projection exprs=[#0.0, #0.1, #0.5]
+  NestedIndexJoin type=inner index=idx_composite_orders_user
+    SeqScan table=composite_users
+
+query
+explain select composite_users.tenant_id, composite_users.id, composite_orders.item
+from composite_users join composite_orders
+on composite_orders.tenant_id = composite_users.tenant_id
+and composite_orders.user_id = composite_users.id;
+----
+Projection exprs=[#0.0, #0.1, #0.5]
+  NestedIndexJoin type=inner index=idx_composite_orders_user
+    SeqScan table=composite_users
 
 # Left-side indexes are intentionally not used yet because that would require
 # preserving original join output ordering while probing the original left table.
 statement ok
-create table indexed_users(id int primary key, name varchar(32));
+create table indexed_users(id int, name varchar(32));
+
+statement ok
+create index idx_indexed_users_id on indexed_users(id);
 
 statement ok
 create table plain_orders(user_id int, item varchar(32));

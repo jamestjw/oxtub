@@ -13,6 +13,9 @@ pub enum BinderError {
     #[error("duplicate primary key column: {0}")]
     DuplicatePrimaryKeyColumn(String),
 
+    #[error("duplicate index column: {0}")]
+    DuplicateIndexColumn(String),
+
     #[error("creating table without columns")]
     CreateTableWithoutColumns,
 

@@ -11,6 +11,7 @@ pub enum Statement {
     Delete(DeleteStatement),
     Explain(ExplainStatement),
     CreateTable(CreateTableStatement),
+    CreateIndex(CreateIndexStatement),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +64,14 @@ pub struct CreateTableStatement {
     pub table_name: String,
     pub columns: Vec<CreateColumn>,
     pub primary_key: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndexStatement {
+    pub index_name: String,
+    pub table_name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

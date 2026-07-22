@@ -1,5 +1,5 @@
 use crate::{
-    catalog::column::Column,
+    catalog::{column::Column, schema::Schema},
     query::binder::{
         expression::{BoundExpression, ColumnRef},
         table_ref::{BoundBaseTableRef, BoundExpressionListRef, BoundTableRef},
@@ -66,7 +66,14 @@ pub struct BoundCreateTable {
 }
 
 #[derive(Debug)]
-pub struct BoundCreateIndex;
+pub struct BoundCreateIndex {
+    pub index_name: String,
+    pub table_name: String,
+    pub key_schema: Schema,
+    pub key_attrs: Vec<usize>,
+    pub key_size: usize,
+    pub unique: bool,
+}
 
 #[derive(Debug)]
 pub struct BoundDropTable;

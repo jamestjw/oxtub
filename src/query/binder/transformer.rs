@@ -7,15 +7,16 @@ use crate::{
             error::BinderError,
             expression::{BoundExpression, ColumnRef, are_column_refs_unique},
             statement::{
-                BoundCreateTable, BoundDelete, BoundExplain, BoundInsert, BoundInsertSource,
-                BoundSelect, BoundStatement, BoundUpdate,
+                BoundCreateIndex, BoundCreateTable, BoundDelete, BoundExplain, BoundInsert,
+                BoundInsertSource, BoundSelect, BoundStatement, BoundUpdate,
             },
             table_ref::{BoundBaseTableRef, BoundExpressionListRef, BoundJoin, BoundTableRef},
         },
         expression::{ColumnQualifier, Expression, ParsedColumnRef},
         statement::{
-            CreateColumn, CreateTableStatement, DeleteStatement, ExplainStatement, InsertSource,
-            InsertStatement, SelectItem, SelectStatement, Statement, UpdateStatement,
+            CreateColumn, CreateIndexStatement, CreateTableStatement, DeleteStatement,
+            ExplainStatement, InsertSource, InsertStatement, SelectItem, SelectStatement,
+            Statement, UpdateStatement,
         },
         table_ref::TableRef as ParsedTableRef,
     },
@@ -83,6 +84,9 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
             Statement::Explain(explain_statement) => self.bind_explain(explain_statement),
             Statement::CreateTable(create_table_statement) => {
                 self.bind_create_tbl(create_table_statement)
+            }
+            Statement::CreateIndex(create_index_statement) => {
+                self.bind_create_index(create_index_statement)
             }
         }
     }
@@ -247,6 +251,48 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
             name: stmt.table_name,
             columns,
             primary_key_col_idxs,
+        }))
+    }
+
+    fn bind_create_index(&self, stmt: CreateIndexStatement) -> Result<BoundStatement, BinderError> {
+        let table = self.bind_base_table_ref(stmt.table_name.clone(), None)?;
+        let mut seen_columns = HashSet::new();
+        let mut key_attrs = Vec::with_capacity(stmt.columns.len());
+
+        for column in stmt.columns {
+            let column_key = column.to_lowercase();
+            if !seen_columns.insert(column_key.clone()) {
+                return Err(BinderError::DuplicateIndexColumn(column));
+            }
+
+            let Some(col_idx) = table
+                .schema()
+                .columns()
+                .iter()
+                .position(|schema_col| schema_col.name().to_lowercase() == column_key)
+            else {
+                return Err(BinderError::ColumnNotFound(column));
+            };
+
+            key_attrs.push(col_idx);
+        }
+
+        let key_columns = key_attrs
+            .iter()
+            .map(|idx| table.schema().columns()[*idx].clone())
+            .collect::<Vec<_>>();
+        let key_size = key_columns
+            .iter()
+            .map(|column| column.declared_size())
+            .sum::<usize>();
+
+        Ok(BoundStatement::CreateIndex(BoundCreateIndex {
+            index_name: stmt.index_name,
+            table_name: stmt.table_name,
+            key_schema: Schema::new(&key_columns),
+            key_attrs,
+            key_size,
+            unique: stmt.unique,
         }))
     }
 
@@ -634,6 +680,81 @@ mod tests {
                 ],
             }"#]]
         .assert_eq(&format!("{create_table:#?}"));
+    }
+
+    #[test]
+    fn binds_create_index() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("create index idx_users_name_id on users (name, id)").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::CreateIndex(create_index) = bound else {
+            panic!("expected create index statement");
+        };
+
+        expect![[r#"
+            BoundCreateIndex {
+                index_name: "idx_users_name_id",
+                table_name: "users",
+                key_schema: Schema {
+                    inlined_storage_size: 9,
+                    columns: [
+                        Column {
+                            name: "name",
+                            sql_type: Varchar,
+                            value_offset: 1,
+                            size: Variable(
+                                32,
+                            ),
+                        },
+                        Column {
+                            name: "id",
+                            sql_type: Integer,
+                            value_offset: 5,
+                            size: Inline(
+                                4,
+                            ),
+                        },
+                    ],
+                    uninlined_columns: [
+                        0,
+                    ],
+                },
+                key_attrs: [
+                    1,
+                    0,
+                ],
+                key_size: 36,
+                unique: false,
+            }"#]]
+        .assert_eq(&format!("{create_index:#?}"));
+    }
+
+    #[test]
+    fn rejects_create_index_duplicate_columns() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("create index idx_users_id on users (id, id)").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::DuplicateIndexColumn(column) if column == "id"));
+    }
+
+    #[test]
+    fn rejects_create_index_missing_column() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("create index idx_users_missing on users (missing)").unwrap();
+        let err = unwrap_binder_err(binder.bind_statement(statement));
+
+        assert!(matches!(err, BinderError::ColumnNotFound(column) if column == "missing"));
     }
 
     #[test]

@@ -89,10 +89,6 @@ impl<'a> Catalog<'a> {
         key_size: usize,
         is_pk: bool,
     ) -> Result<&IndexInfo<'_>, CatalogError> {
-        if !self.table_names.contains_key(&table_name) {
-            return Err(CatalogError::TableNotFound(table_name.as_str().into()));
-        }
-
         let table_schema = match self.table_names.get(&table_name) {
             None => return Err(CatalogError::TableNotFound(table_name.as_str().into())),
             Some(oid) => match self.tables.get(oid) {

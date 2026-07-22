@@ -16,8 +16,9 @@ use crate::{
         error::QueryError,
         expression::{BinaryOperator, ColumnQualifier, Expression, ParsedColumnRef, UnaryOperator},
         statement::{
-            CreateColumn, CreateTableStatement, DeleteStatement, ExplainStatement, InsertSource,
-            InsertStatement, SelectItem, SelectStatement, Statement, UpdateStatement,
+            CreateColumn, CreateIndexStatement, CreateTableStatement, DeleteStatement,
+            ExplainStatement, InsertSource, InsertStatement, SelectItem, SelectStatement,
+            Statement, UpdateStatement,
         },
         table_ref::{JoinType, TableRef},
     },
@@ -52,8 +53,9 @@ fn convert_statement(statement: SqlStatement) -> Result<Statement, QueryError> {
             analyze, verbose, query_plan, estimate, statement, format, options,
         ),
         SqlStatement::CreateTable(create) => convert_create_table(create),
+        SqlStatement::CreateIndex(create) => convert_create_index(create),
         _ => Err(QueryError::UnsupportedStatement(
-            "only SELECT, INSERT, UPDATE, DELETE, EXPLAIN, and CREATE TABLE are supported",
+            "only SELECT, INSERT, UPDATE, DELETE, EXPLAIN, CREATE TABLE, and CREATE INDEX are supported",
         )),
     }
 }
@@ -300,6 +302,43 @@ fn convert_create_table(create: sqlparser::ast::CreateTable) -> Result<Statement
     }))
 }
 
+fn convert_create_index(create: sqlparser::ast::CreateIndex) -> Result<Statement, QueryError> {
+    if create.name.is_none()
+        || create.using.is_some()
+        || create.concurrently
+        || create.if_not_exists
+        || !create.include.is_empty()
+        || create.nulls_distinct.is_some()
+        || !create.with.is_empty()
+        || create.predicate.is_some()
+        || !create.index_options.is_empty()
+        || !create.alter_options.is_empty()
+    {
+        return Err(QueryError::UnsupportedStatement(
+            "only CREATE INDEX name ON table (columns) is supported",
+        ));
+    }
+
+    if create.columns.is_empty() {
+        return Err(QueryError::UnsupportedStatement(
+            "CREATE INDEX requires at least one column",
+        ));
+    }
+
+    let columns = create
+        .columns
+        .into_iter()
+        .map(convert_index_column)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Statement::CreateIndex(CreateIndexStatement {
+        index_name: object_name_to_string(&create.name.expect("checked above")),
+        table_name: object_name_to_string(&create.table_name),
+        columns,
+        unique: create.unique,
+    }))
+}
+
 fn column_has_primary_key(column: &sqlparser::ast::ColumnDef) -> Result<bool, QueryError> {
     let mut has_primary_key = false;
     for option in &column.options {
@@ -323,6 +362,25 @@ fn convert_primary_key_column(column: IndexColumn) -> Result<String, QueryError>
         SqlExpr::Identifier(ident) => Ok(ident_to_string(&ident)),
         _ => Err(QueryError::UnsupportedStatement(
             "PRIMARY KEY columns must be simple identifiers",
+        )),
+    }
+}
+
+fn convert_index_column(column: IndexColumn) -> Result<String, QueryError> {
+    if column.operator_class.is_some()
+        || column.column.options.asc.is_some()
+        || column.column.options.nulls_first.is_some()
+        || column.column.with_fill.is_some()
+    {
+        return Err(QueryError::UnsupportedStatement(
+            "CREATE INDEX columns must be simple identifiers",
+        ));
+    }
+
+    match column.column.expr {
+        SqlExpr::Identifier(ident) => Ok(ident_to_string(&ident)),
+        _ => Err(QueryError::UnsupportedStatement(
+            "CREATE INDEX columns must be simple identifiers",
         )),
     }
 }
@@ -1147,6 +1205,56 @@ mod tests {
                 },
             )"#]]
         .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn parses_create_index() {
+        let statement = parse_sql("create index idx_users_name on users (name, id)").unwrap();
+
+        expect![[r#"
+            CreateIndex(
+                CreateIndexStatement {
+                    index_name: "idx_users_name",
+                    table_name: "users",
+                    columns: [
+                        "name",
+                        "id",
+                    ],
+                    unique: false,
+                },
+            )"#]]
+        .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn parses_create_unique_index() {
+        let statement = parse_sql("create unique index idx_users_id on users (id)").unwrap();
+
+        expect![[r#"
+            CreateIndex(
+                CreateIndexStatement {
+                    index_name: "idx_users_id",
+                    table_name: "users",
+                    columns: [
+                        "id",
+                    ],
+                    unique: true,
+                },
+            )"#]]
+        .assert_eq(&format!("{statement:#?}"));
+    }
+
+    #[test]
+    fn rejects_unsupported_create_index_features() {
+        let err = parse_sql("create index idx_users_id on users using hash (id)").unwrap_err();
+        assert!(matches!(err, QueryError::UnsupportedStatement(_)));
+
+        let err =
+            parse_sql("create index idx_users_lower_name on users (lower(name))").unwrap_err();
+        assert!(matches!(err, QueryError::UnsupportedStatement(_)));
+
+        let err = parse_sql("create index idx_users_id on users (id desc)").unwrap_err();
+        assert!(matches!(err, QueryError::UnsupportedStatement(_)));
     }
 
     #[test]

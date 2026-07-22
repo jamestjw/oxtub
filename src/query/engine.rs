@@ -7,7 +7,7 @@ use crate::{
     query::{
         binder::{
             error::BinderError,
-            statement::{BoundCreateTable, BoundExplain, BoundStatement},
+            statement::{BoundCreateIndex, BoundCreateTable, BoundExplain, BoundStatement},
             transformer::Binder,
         },
         error::QueryError,
@@ -40,6 +40,9 @@ pub enum QueryEngineError {
 
     #[error("unsupported statement")]
     UnsupportedStatement,
+
+    #[error("unique indexes are not supported")]
+    UnsupportedUniqueIndex,
 }
 
 #[derive(Debug)]
@@ -71,6 +74,7 @@ impl<'catalog, 'bpm> QueryEngine<'catalog, 'bpm> {
 
         match bound_statement {
             BoundStatement::CreateTable(create_table) => self.execute_create_table(create_table),
+            BoundStatement::CreateIndex(create_index) => self.execute_create_index(create_index),
             BoundStatement::Explain(explain) => self.execute_explain(explain),
             BoundStatement::Select(_)
             | BoundStatement::Insert(_)
@@ -84,9 +88,9 @@ impl<'catalog, 'bpm> QueryEngine<'catalog, 'bpm> {
                     execution_engine.execute(plan, batch_size)?,
                 ))
             }
-            BoundStatement::CreateIndex(_)
-            | BoundStatement::DropTable(_)
-            | BoundStatement::DropIndex(_) => Err(QueryEngineError::UnsupportedStatement),
+            BoundStatement::DropTable(_) | BoundStatement::DropIndex(_) => {
+                Err(QueryEngineError::UnsupportedStatement)
+            }
         }
     }
 
@@ -161,13 +165,37 @@ impl<'catalog, 'bpm> QueryEngine<'catalog, 'bpm> {
             tag: String::from("CREATE TABLE"),
         })
     }
+
+    fn execute_create_index(
+        &mut self,
+        BoundCreateIndex {
+            index_name,
+            table_name,
+            key_schema,
+            key_attrs,
+            key_size,
+            unique,
+        }: BoundCreateIndex,
+    ) -> Result<QueryResult, QueryEngineError> {
+        if unique {
+            return Err(QueryEngineError::UnsupportedUniqueIndex);
+        }
+
+        self.catalog.create_index(
+            index_name, table_name, key_schema, key_attrs, key_size, false,
+        )?;
+
+        Ok(QueryResult::Command {
+            tag: String::from("CREATE INDEX"),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
         catalog::manager::Catalog,
-        query::{engine::QueryEngine, engine::QueryResult},
+        query::{engine::QueryEngine, engine::QueryEngineError, engine::QueryResult},
         testing::setup_bpm,
         types::value::Value,
     };
@@ -222,5 +250,33 @@ mod tests {
         assert!(plan.contains("Filter predicate=(#0.0 = 1)"));
         assert!(plan.contains("SeqScan table=users"));
         assert!(!plan.contains("SeqScan table=users filter="));
+    }
+
+    #[test]
+    fn executes_create_index() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        let mut engine = setup_engine(&mut catalog);
+
+        let QueryResult::Command { tag } = engine
+            .execute_sql("create index idx_users_id on users (id)")
+            .unwrap()
+        else {
+            panic!("CREATE INDEX should return a command result");
+        };
+
+        assert_eq!(tag, "CREATE INDEX");
+    }
+
+    #[test]
+    fn rejects_unique_create_index_at_execution() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        let mut engine = setup_engine(&mut catalog);
+        let err = engine
+            .execute_sql("create unique index idx_users_id on users (id)")
+            .unwrap_err();
+
+        assert!(matches!(err, QueryEngineError::UnsupportedUniqueIndex));
     }
 }
