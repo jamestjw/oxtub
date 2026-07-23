@@ -13,7 +13,7 @@ pub struct IndexMetadata {
     pub is_pk: bool,
 }
 
-pub trait Index {
+pub trait Index: Send {
     fn metadata(&self) -> &IndexMetadata;
     fn insert_entry(&self, key: &Tuple, rid: Rid) -> Result<(), IndexError>;
     fn delete_entry(&self, key: &Tuple, rid: Rid) -> Result<(), IndexError>;

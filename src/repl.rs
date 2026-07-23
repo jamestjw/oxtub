@@ -6,18 +6,15 @@ use std::{
 };
 
 use crate::{
-    buffer::bpm::BufferPoolManager,
-    catalog::manager::Catalog,
-    query::engine::{QueryEngine, QueryResult},
-    storage::disk::disk_manager::DiskManager,
-    types::value::Value,
+    buffer::bpm::BufferPoolManager, database::Database, query::engine::QueryResult,
+    storage::disk::disk_manager::DiskManager, types::value::Value,
 };
 
 pub fn run() -> io::Result<()> {
     let db_path = TempDbPath::new();
     let disk_manager = DiskManager::new(db_path.path.clone()).unwrap();
     let bpm = BufferPoolManager::new(128, disk_manager);
-    let mut catalog = Catalog::new(&bpm);
+    let database = Database::new(&bpm);
     let mut sql = String::new();
 
     // TODO: Handle Ctrl+C/SIGINT gracefully so the temp DB file is cleaned up.
@@ -38,7 +35,9 @@ pub fn run() -> io::Result<()> {
                     continue;
                 }
                 ".tables" => {
-                    print_tables(&catalog);
+                    if let Err(err) = print_tables(&database) {
+                        eprintln!("error: {err}");
+                    }
                     continue;
                 }
                 "" => continue,
@@ -53,8 +52,7 @@ pub fn run() -> io::Result<()> {
 
         let statement = sql.trim().trim_end_matches(';').trim();
         if !statement.is_empty() {
-            let mut engine = QueryEngine::new(&mut catalog);
-            match engine.execute_sql(statement) {
+            match database.execute_sql(statement) {
                 Ok(result) => print_result(result),
                 Err(err) => eprintln!("error: {err}"),
             }
@@ -63,7 +61,7 @@ pub fn run() -> io::Result<()> {
         sql.clear();
     }
 
-    drop(catalog);
+    drop(database);
     drop(bpm);
 
     Ok(())
@@ -113,18 +111,20 @@ fn print_help() {
     println!("Commands: .help, .tables, .quit, .exit");
 }
 
-fn print_tables(catalog: &Catalog<'_>) {
-    let mut table_names = catalog.table_names();
+fn print_tables(database: &Database<'_>) -> Result<(), crate::database::DatabaseError> {
+    let mut table_names = database.table_names()?;
     table_names.sort_unstable();
 
     if table_names.is_empty() {
         println!("(no tables)");
-        return;
+        return Ok(());
     }
 
     for table_name in table_names {
         println!("{table_name}");
     }
+
+    Ok(())
 }
 
 fn print_result(result: QueryResult) {
