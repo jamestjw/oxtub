@@ -3,11 +3,11 @@ use crate::{
     query::{
         executor::{
             ExecutionError, Executor, ExecutorContext, ExecutorRow, expression::filter_join_row,
+            join::build_join_tuple,
         },
         planner::plan::NestedLoopJoinPlan,
         table_ref::JoinType,
     },
-    types::value::Value,
 };
 
 pub struct NestedLoopJoinExecutor<'ctx, 'catalog, 'bpm, 'plan> {
@@ -41,27 +41,6 @@ impl<'ctx, 'catalog, 'bpm, 'plan> NestedLoopJoinExecutor<'ctx, 'catalog, 'bpm, '
             outer_tuple_offset: 0,
             outer_tuple_matched: false,
         }
-    }
-
-    fn build_join_tuple(
-        output_schema: &'plan Schema,
-        left_tuple: &ExecutorRow,
-        right_tuple: Option<&ExecutorRow>,
-    ) -> ExecutorRow {
-        let mut values = Vec::with_capacity(output_schema.num_columns());
-        values.extend_from_slice(&left_tuple.values);
-
-        match right_tuple {
-            Some(right_tuple) => values.extend_from_slice(&right_tuple.values),
-            None => {
-                let right_null_values = output_schema.columns()[values.len()..]
-                    .iter()
-                    .map(|col| Value::Null(col.sql_type()))
-                    .collect::<Vec<_>>();
-                values.extend(right_null_values);
-            }
-        }
-        ExecutorRow { rid: None, values }
     }
 
     pub fn keep_row(
@@ -110,7 +89,7 @@ impl Executor for NestedLoopJoinExecutor<'_, '_, '_, '_> {
                     // Inner loop complete, go back to the outer loop to get a new outer tuple
                     if self.plan.join_type == JoinType::Left && !self.outer_tuple_matched {
                         let joined_tuple =
-                            Self::build_join_tuple(self.output_schema, curr_outer_tuple, None);
+                            build_join_tuple(self.output_schema, curr_outer_tuple, None);
                         out.push(joined_tuple);
                     }
 
@@ -132,7 +111,7 @@ impl Executor for NestedLoopJoinExecutor<'_, '_, '_, '_> {
             while let Some(inner_tuple) = self.buffered_inner_tuples.next() {
                 if self.keep_row(curr_outer_tuple, &inner_tuple)? {
                     self.outer_tuple_matched = true;
-                    out.push(Self::build_join_tuple(
+                    out.push(build_join_tuple(
                         self.output_schema,
                         curr_outer_tuple,
                         Some(&inner_tuple),

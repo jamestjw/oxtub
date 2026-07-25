@@ -7,6 +7,7 @@ use crate::{
             executor::{Executor, ExecutorContext},
             filter::FilterExecutor,
             insert::InsertExecutor,
+            nested_index_join::NestedIndexJoinExecutor,
             nested_loop_join::NestedLoopJoinExecutor,
             projection::ProjectionExecutor,
             seq_scan::SeqScanExecutor,
@@ -133,8 +134,14 @@ impl<'catalog, 'bpm> ExecutionEngine<'catalog, 'bpm> {
                     right_child,
                 )))
             }
-            PlanNodeKind::NestedIndexJoin(_) => {
-                todo!("TODO: create nested index join executor")
+            PlanNodeKind::NestedIndexJoin(nested_index_join_plan) => {
+                let child = self.create_executor(&nested_index_join_plan.child)?;
+                Ok(Box::new(NestedIndexJoinExecutor::new(
+                    &self.exec_ctx,
+                    nested_index_join_plan,
+                    plan.output_schema(),
+                    child,
+                )))
             }
         }
     }

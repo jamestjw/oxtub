@@ -446,6 +446,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         right: PlannedExpression,
         comparison_type: ComparisonType,
     ) -> PlannedExpression {
+        // TODO: validate comparison operand types here before planning the expression.
         PlannedExpression {
             return_type: ExpressionType::new_bool(),
             kind: PlannedExpressionKind::Comparison(ComparisonExpression {

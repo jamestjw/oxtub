@@ -207,6 +207,10 @@ impl Tuple {
             .collect()
     }
 
+    pub fn all_values_not_null(&self, schema: &Schema) -> bool {
+        (0..schema.num_columns()).all(|idx| !self.is_null(schema, idx))
+    }
+
     fn is_null(&self, schema: &Schema, idx: usize) -> bool {
         let bitmap_size = NullBitmap::num_bytes(schema.num_columns());
         NullBitmap::new(&self.data[..bitmap_size]).is_null(idx)
