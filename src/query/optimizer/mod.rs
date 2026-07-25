@@ -284,15 +284,6 @@ impl<'catalog, 'bpm> Optimizer<'catalog, 'bpm> {
         }
     }
 
-    fn rewrite_expression_for_join(
-        &self,
-        expr: PlannedExpression,
-        _left_column_count: usize,
-        _right_column_count: usize,
-    ) -> PlannedExpression {
-        expr
-    }
-
     fn optimize_order_by_as_index_scan(&self, plan: &PlanNode) -> PlanNode {
         plan.clone()
     }

@@ -25,12 +25,32 @@ pub struct SelectStatement {
     pub table: TableRef,
     pub projection: Vec<SelectItem>,
     pub where_clause: Option<Expression>,
+    pub order_by: Vec<OrderByItem>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectItem {
     Wildcard,
     Expression(Expression),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderByItem {
+    pub expression: Expression,
+    pub order_by_type: OrderByType,
+    pub null_type: OrderByNullType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderByType {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderByNullType {
+    First,
+    Last,
 }
 
 #[derive(Debug, Clone, PartialEq)]

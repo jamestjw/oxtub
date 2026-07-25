@@ -301,6 +301,9 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             }
         };
 
+        // TODO: plan ORDER BY as a sort executor.
+        let _order_by = stmt.order_by;
+
         Ok(plan)
     }
 

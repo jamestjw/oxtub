@@ -8,15 +8,15 @@ use crate::{
             expression::{BoundExpression, ColumnRef, are_column_refs_unique},
             statement::{
                 BoundCreateIndex, BoundCreateTable, BoundDelete, BoundExplain, BoundInsert,
-                BoundInsertSource, BoundSelect, BoundStatement, BoundUpdate,
+                BoundInsertSource, BoundOrderBy, BoundSelect, BoundStatement, BoundUpdate,
             },
             table_ref::{BoundBaseTableRef, BoundExpressionListRef, BoundJoin, BoundTableRef},
         },
         expression::{ColumnQualifier, Expression, ParsedColumnRef},
         statement::{
             CreateColumn, CreateIndexStatement, CreateTableStatement, DeleteStatement,
-            ExplainStatement, InsertSource, InsertStatement, SelectItem, SelectStatement,
-            Statement, UpdateStatement,
+            ExplainStatement, InsertSource, InsertStatement, OrderByItem, SelectItem,
+            SelectStatement, Statement, UpdateStatement,
         },
         table_ref::TableRef as ParsedTableRef,
     },
@@ -170,12 +170,31 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
             .where_clause
             .map(|expr| self.bind_expression(expr, &context))
             .transpose()?;
+        let order_by = self.bind_order_by_list(stmt.order_by, &context)?;
 
         Ok(BoundSelect {
             table: tbl_ref,
             projection,
             where_,
+            order_by,
         })
+    }
+
+    fn bind_order_by_list(
+        &self,
+        order_by: Vec<OrderByItem>,
+        context: &BindContext<'_>,
+    ) -> Result<Vec<BoundOrderBy>, BinderError> {
+        order_by
+            .into_iter()
+            .map(|item| {
+                Ok(BoundOrderBy {
+                    expression: self.bind_expression(item.expression, context)?,
+                    order_by_type: item.order_by_type,
+                    null_type: item.null_type,
+                })
+            })
+            .collect()
     }
 
     fn bind_select_list(
@@ -574,7 +593,11 @@ mod tests {
 
     use crate::{
         catalog::{column::Column, schema::Schema},
-        query::{binder::statement::BoundStatement, parser::parse_sql},
+        query::{
+            binder::statement::BoundStatement,
+            parser::parse_sql,
+            statement::{OrderByNullType, OrderByType},
+        },
         testing::setup_bpm,
     };
 
@@ -1207,6 +1230,28 @@ mod tests {
     }
 
     #[test]
+    fn binds_select_order_by() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("select id from users order by name desc nulls last").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Select(select) = bound else {
+            panic!("expected select statement");
+        };
+
+        assert_eq!(select.order_by.len(), 1);
+        assert_eq!(select.order_by[0].order_by_type, OrderByType::Desc);
+        assert_eq!(select.order_by[0].null_type, OrderByNullType::Last);
+        assert!(matches!(
+            select.order_by[0].expression,
+            BoundExpression::Column(ColumnRef::TableQualified { ref column, .. }) if column == "name"
+        ));
+    }
+
+    #[test]
     fn binds_update_with_assignments_and_where_clause() {
         let bpm = setup_bpm(3);
         let mut catalog = Catalog::new(&bpm);
@@ -1452,6 +1497,7 @@ mod tests {
             },
             projection: vec![],
             where_clause: None,
+            order_by: vec![],
         });
         let err = unwrap_binder_err(binder.bind_statement(statement));
 

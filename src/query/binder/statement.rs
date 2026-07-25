@@ -4,6 +4,7 @@ use crate::{
         expression::{BoundExpression, ColumnRef},
         table_ref::{BoundBaseTableRef, BoundExpressionListRef, BoundTableRef},
     },
+    query::statement::{OrderByNullType, OrderByType},
 };
 
 #[derive(Debug)]
@@ -24,6 +25,14 @@ pub struct BoundSelect {
     pub table: BoundTableRef,
     pub projection: Vec<BoundExpression>,
     pub where_: Option<BoundExpression>,
+    pub order_by: Vec<BoundOrderBy>,
+}
+
+#[derive(Debug)]
+pub struct BoundOrderBy {
+    pub expression: BoundExpression,
+    pub order_by_type: OrderByType,
+    pub null_type: OrderByNullType,
 }
 
 #[derive(Debug)]
