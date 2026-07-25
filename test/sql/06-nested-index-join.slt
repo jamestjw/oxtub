@@ -31,6 +31,42 @@ Projection exprs=[#0.0, #0.1, #0.3]
   NestedIndexJoin type=left index=idx_orders_user_id
     SeqScan table=users
 
+query
+insert into users values (1, 'alice'), (2, 'bob'), (3, 'cara'), (4, 'dana');
+----
+4
+
+query
+insert into orders values (1, 'book'), (1, 'pen'), (3, 'bag');
+----
+3
+
+query rowsort
+select users.id, users.name, orders.item
+from users join orders on users.id = orders.user_id;
+----
+1 alice book
+1 alice pen
+3 cara bag
+
+query rowsort
+select users.id, users.name, orders.item
+from users join orders on orders.user_id = users.id;
+----
+1 alice book
+1 alice pen
+3 cara bag
+
+query rowsort
+select users.id, users.name, orders.item
+from users left join orders on users.id = orders.user_id;
+----
+1 alice book
+1 alice pen
+2 bob NULL
+3 cara bag
+4 dana NULL
+
 statement ok
 create table composite_users(tenant_id int, id int, name varchar(32));
 
@@ -59,6 +95,26 @@ and composite_orders.user_id = composite_users.id;
 Projection exprs=[#0.0, #0.1, #0.5]
   NestedIndexJoin type=inner index=idx_composite_orders_user
     SeqScan table=composite_users
+
+query
+insert into composite_users values (10, 1, 'alice'), (10, 2, 'bob'), (20, 1, 'cara');
+----
+3
+
+query
+insert into composite_orders values (10, 1, 'book'), (10, 1, 'pen'), (20, 1, 'bag'), (10, 3, 'cup');
+----
+4
+
+query rowsort
+select composite_users.tenant_id, composite_users.id, composite_orders.item
+from composite_users join composite_orders
+on composite_users.tenant_id = composite_orders.tenant_id
+and composite_users.id = composite_orders.user_id;
+----
+10 1 book
+10 1 pen
+20 1 bag
 
 # Left-side indexes are intentionally not used yet because that would require
 # preserving original join output ordering while probing the original left table.

@@ -279,4 +279,66 @@ mod tests {
 
         assert!(matches!(err, QueryEngineError::UnsupportedUniqueIndex));
     }
+
+    #[test]
+    fn nested_index_join_resumes_duplicate_matches_across_small_batches() {
+        let bpm = setup_bpm(20);
+        let mut catalog = Catalog::new(&bpm);
+        let mut engine = setup_engine(&mut catalog);
+        engine
+            .execute_sql("create table orders(user_id int, item varchar(32));")
+            .unwrap();
+        engine
+            .execute_sql("create index idx_orders_user_id on orders(user_id);")
+            .unwrap();
+        engine
+            .execute_sql("insert into users values (1, 'alice'), (2, 'bob');")
+            .unwrap();
+        engine
+            .execute_sql(
+                "insert into orders values (1, 'book'), (1, 'pen'), (1, 'bag'), (2, 'cup');",
+            )
+            .unwrap();
+
+        let QueryResult::Rows(result) = engine
+            .execute_sql_with_batch_size(
+                "select users.id, users.name, orders.item \
+                 from users join orders on users.id = orders.user_id;",
+                1,
+            )
+            .unwrap()
+        else {
+            panic!("SELECT should return rows");
+        };
+
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .map(|row| row.values.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                vec![
+                    Value::Integer(1),
+                    Value::Varchar("alice".to_string()),
+                    Value::Varchar("book".to_string()),
+                ],
+                vec![
+                    Value::Integer(1),
+                    Value::Varchar("alice".to_string()),
+                    Value::Varchar("pen".to_string()),
+                ],
+                vec![
+                    Value::Integer(1),
+                    Value::Varchar("alice".to_string()),
+                    Value::Varchar("bag".to_string()),
+                ],
+                vec![
+                    Value::Integer(2),
+                    Value::Varchar("bob".to_string()),
+                    Value::Varchar("cup".to_string()),
+                ],
+            ]
+        );
+    }
 }
