@@ -2,7 +2,9 @@ use thiserror::Error;
 
 use crate::{
     catalog::error::CatalogError,
-    storage::{index::error::IndexError, table::error::TableHeapError},
+    storage::{
+        disk::error::BufferPoolError, index::error::IndexError, table::error::TableHeapError,
+    },
     types::value::Value,
 };
 
@@ -16,6 +18,9 @@ pub enum ExecutionError {
 
     #[error("index error: {0}")]
     Index(#[from] IndexError),
+
+    #[error("buffer pool error: {0}")]
+    BufferPool(#[from] BufferPoolError),
 
     #[error("expected boolean expression, got {0:?}")]
     ExpectedBoolean(Value),

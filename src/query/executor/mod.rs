@@ -10,6 +10,7 @@ pub mod nested_index_join;
 pub mod nested_loop_join;
 pub mod projection;
 pub mod seq_scan;
+pub mod sort;
 pub mod update;
 pub mod values;
 

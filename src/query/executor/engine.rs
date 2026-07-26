@@ -11,6 +11,7 @@ use crate::{
             nested_loop_join::NestedLoopJoinExecutor,
             projection::ProjectionExecutor,
             seq_scan::SeqScanExecutor,
+            sort::ExternalMergeSortExecutor,
             update::UpdateExecutor,
             values::ValuesExecutor,
         },
@@ -143,7 +144,15 @@ impl<'catalog, 'bpm> ExecutionEngine<'catalog, 'bpm> {
                     child,
                 )))
             }
-            PlanNodeKind::Sort(sort_plan) => todo!("hook up sort executor"),
+            PlanNodeKind::Sort(sort_plan) => {
+                let child = self.create_executor(&sort_plan.child)?;
+                Ok(Box::new(ExternalMergeSortExecutor::new(
+                    &self.exec_ctx,
+                    sort_plan,
+                    plan.output_schema(),
+                    child,
+                )))
+            }
         }
     }
 }

@@ -39,6 +39,10 @@ impl<'a> Catalog<'a> {
         }
     }
 
+    pub fn bpm(&self) -> &'a BufferPoolManager {
+        self.bpm
+    }
+
     pub fn create_tbl(
         &mut self,
         name: String,

@@ -1,4 +1,5 @@
 use crate::{
+    buffer::bpm::BufferPoolManager,
     catalog::{manager::Catalog, schema::Schema},
     query::executor::{engine::ExecutorRow, error::ExecutionError},
 };
@@ -10,6 +11,10 @@ pub struct ExecutorContext<'catalog, 'bpm> {
 impl<'catalog, 'bpm> ExecutorContext<'catalog, 'bpm> {
     pub fn new(catalog: &'catalog Catalog<'bpm>) -> Self {
         Self { catalog }
+    }
+
+    pub fn bpm(&self) -> &'bpm BufferPoolManager {
+        self.catalog.bpm()
     }
 }
 
