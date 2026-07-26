@@ -2,10 +2,14 @@ use crate::{
     catalog::{schema::Schema, types::SqlType},
     query::{
         executor::{engine::ExecutorRow, error::ExecutionError},
-        planner::expression::{
-            ArithmeticExpression, ArithmeticType, ColumnValueExpression, ComparisonExpression,
-            ComparisonType, ConstantValueExpression, LogicExpression, LogicType, NegateExpression,
-            NullCheckExpression, NullCheckType, PlannedExpression, PlannedExpressionKind,
+        planner::{
+            expression::{
+                ArithmeticExpression, ArithmeticType, ColumnValueExpression, ComparisonExpression,
+                ComparisonType, ConstantValueExpression, LogicExpression, LogicType,
+                NegateExpression, NullCheckExpression, NullCheckType, PlannedExpression,
+                PlannedExpressionKind,
+            },
+            plan::PlannedOrderBy,
         },
     },
     storage::table::tuple::Tuple,
@@ -183,6 +187,19 @@ pub fn evaluate_expression_on_tuple(
     };
 
     evaluate_expression(expr, &row)
+}
+
+pub fn generate_sort_key(
+    tuple: &Tuple,
+    schema: &Schema,
+    order_bys: &[PlannedOrderBy],
+) -> Result<Vec<Value>, ExecutionError> {
+    order_bys
+        .iter()
+        .map(|PlannedOrderBy { expression, .. }| {
+            evaluate_expression_on_tuple(expression, tuple, schema)
+        })
+        .collect()
 }
 
 pub fn filter_keep_row(

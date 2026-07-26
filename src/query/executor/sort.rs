@@ -1,7 +1,7 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::VecDeque};
 
 use crate::{
-    buffer::bpm::BufferPoolManager,
+    buffer::{bpm::BufferPoolManager, page_guard::WritePageGuard},
     catalog::schema::Schema,
     common::types::PageId,
     query::{
@@ -9,12 +9,18 @@ use crate::{
             engine::ExecutorRow,
             error::ExecutionError,
             executor::{Executor, ExecutorContext},
+            expression::generate_sort_key,
         },
         planner::plan::{PlannedOrderBy, SortPlan},
     },
-    storage::{page::intermediate_result_page::IntermediateResultPage, table::tuple::Tuple},
+    storage::{
+        page::intermediate_result_page::{IntermediateResultPage, IntermediateResultPageMut},
+        table::tuple::Tuple,
+    },
     types::value::Value,
 };
+
+const SORT_CHILD_BATCH_SIZE: usize = 128;
 
 /// The sort key defines the list of values that sorting is based on.
 pub type SortKey = Vec<Value>;
@@ -135,13 +141,106 @@ impl<'ctx, 'catalog, 'bpm, 'plan> ExternalMergeSortExecutor<'ctx, 'catalog, 'bpm
             dropped_final_run: false,
         }
     }
+
+    fn insert_into_page(
+        &self,
+        mut page_guard: WritePageGuard<'bpm>,
+        tuple: Tuple,
+    ) -> Result<(WritePageGuard<'bpm>, Option<PageId>), ExecutionError> {
+        let mut page = IntermediateResultPageMut::from_data(page_guard.page_data_mut());
+        match page.insert_tuple(&tuple) {
+            Some(_) => Ok((page_guard, None)),
+            None => {
+                // not enough space in curr page
+                drop(page_guard);
+                let new_page_id = self.exec_ctx.bpm().new_page();
+                let mut new_page_guard = self.exec_ctx.bpm().write_page(new_page_id)?;
+                let mut page =
+                    IntermediateResultPageMut::init_from_data(new_page_guard.page_data_mut());
+
+                match page.insert_tuple(&tuple) {
+                    Some(_) => Ok((new_page_guard, Some(new_page_id))),
+                    None => Err(ExecutionError::TupleTooBig),
+                }
+            }
+        }
+    }
 }
 
 impl Executor for ExternalMergeSortExecutor<'_, '_, '_, '_> {
     fn init(&mut self) -> Result<(), ExecutionError> {
         self.child.init()?;
 
-        let final_sorted_run: MergeSortRun<'_> = todo!("perform external merge sort");
+        let child_schema = self.child.output_schema().clone();
+        let curr_page_id = self.exec_ctx.bpm().new_page();
+        let mut curr_page_guard = self.exec_ctx.bpm().write_page(curr_page_id)?;
+        let mut unsorted_pages: Vec<PageId> = vec![curr_page_id];
+
+        loop {
+            let batch = self.child.next(SORT_CHILD_BATCH_SIZE)?;
+
+            if batch.is_empty() {
+                break;
+            }
+
+            for tuple in batch.into_iter() {
+                let (page_guard, new_page_id) = self.insert_into_page(
+                    curr_page_guard,
+                    Tuple::from_values(&tuple.values, &child_schema),
+                )?;
+                curr_page_guard = page_guard;
+
+                if let Some(new_page_id) = new_page_id {
+                    unsorted_pages.push(new_page_id);
+                }
+            }
+        }
+        // It's possible that unsorted_pages contains only a single page and that it's empty
+        // the rest of the code should be able to handle it though
+        drop(curr_page_guard);
+
+        // Build initial runs of sorted pages
+        let mut current_runs: VecDeque<Vec<PageId>> = VecDeque::new();
+
+        for page_id in unsorted_pages {
+            let mut unsorted_page_guard = self.exec_ctx.bpm().write_page(page_id)?;
+            let mut unsorted_page =
+                IntermediateResultPageMut::from_data(unsorted_page_guard.page_data_mut());
+
+            let mut sorted_entries: Vec<SortEntry> = unsorted_page
+                .all_tuples()
+                .into_iter()
+                .map(|tuple| {
+                    Ok((
+                        generate_sort_key(&tuple, &child_schema, &self.plan.order_bys)?,
+                        tuple,
+                    ))
+                })
+                .collect::<Result<Vec<_>, ExecutionError>>()?;
+            sorted_entries
+                .sort_by(|(key_0, _), (key_1, _)| self.comparator.compare_keys(key_0, key_1));
+
+            // Reinitialise the page as we are re-using it for the sorted tuples
+            unsorted_page.init();
+
+            for (_, tuple) in sorted_entries {
+                unsorted_page
+                    .insert_tuple(&tuple)
+                    .expect("if it came from the page, it should still fit now");
+            }
+
+            current_runs.push_back(vec![page_id]);
+        }
+
+        // We need to keep going until we have merged all runs into a single one
+        while current_runs.len() > 1 {
+            todo!("finish this")
+        }
+
+        let final_sorted_run: MergeSortRun<'_> =
+            MergeSortRun::new(self.exec_ctx.bpm(), current_runs.pop_back().unwrap());
+
+        // TODO: see if we end up using this field or not, might be superfluous
         self.sorted_page_ids = final_sorted_run.page_ids().to_vec();
         self.sorted_iterator = Some(final_sorted_run.into_iter());
 

@@ -106,6 +106,18 @@ impl<'a> IntermediateResultPageView<'a> {
 
         Tuple::from_bytes(self.bytes()[start..end].to_vec())
     }
+
+    pub fn all_tuples(&self) -> Vec<Tuple> {
+        (0..self.num_tuples())
+            .map(|i| {
+                let tuple_info = self.tuple_infos()[i];
+                let start = tuple_info.tuple_offset as usize;
+                let end = start + tuple_info.tuple_size as usize;
+
+                Tuple::from_bytes(self.bytes()[start..end].to_vec())
+            })
+            .collect()
+    }
 }
 
 impl<'a> IntermediateResultPage<'a> {
@@ -129,9 +141,14 @@ impl<'a> IntermediateResultPageMut<'a> {
         Self { data }
     }
 
-    pub fn init(data: &'a mut PageData) -> Self {
-        data.0.fill(0);
-        Self::from_data(data)
+    pub fn init(&mut self) {
+        self.data.0.fill(0);
+    }
+
+    pub fn init_from_data(data: &'a mut PageData) -> Self {
+        let mut page = Self::from_data(data);
+        page.init();
+        page
     }
 
     fn view(&self) -> IntermediateResultPageView<'_> {
@@ -180,6 +197,10 @@ impl<'a> IntermediateResultPageMut<'a> {
             None
         }
     }
+
+    pub fn all_tuples(&self) -> Vec<Tuple> {
+        self.view().all_tuples()
+    }
 }
 
 #[cfg(test)]
@@ -196,7 +217,7 @@ mod tests {
     #[test]
     fn inserts_and_reads_tuples() {
         let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
-        let mut page = IntermediateResultPageMut::init(&mut data);
+        let mut page = IntermediateResultPageMut::init_from_data(&mut data);
         let tuple0 = Tuple::from_bytes(vec![1, 2, 3, 4]);
         let tuple1 = Tuple::from_bytes(vec![9, 8, 7]);
 
@@ -220,7 +241,7 @@ mod tests {
     #[test]
     fn rejects_tuple_that_cannot_fit() {
         let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
-        let mut page = IntermediateResultPageMut::init(&mut data);
+        let mut page = IntermediateResultPageMut::init_from_data(&mut data);
         let tuple = Tuple::from_bytes(vec![0; DEFAULT_PAGE_SIZE]);
 
         assert_eq!(page.insert_tuple(&tuple), None);
@@ -230,7 +251,7 @@ mod tests {
     #[test]
     fn insert_tuple_can_exactly_fill_free_space() {
         let mut data = PageData([0; DEFAULT_PAGE_SIZE]);
-        let mut page = IntermediateResultPageMut::init(&mut data);
+        let mut page = IntermediateResultPageMut::init_from_data(&mut data);
         let tuple_size = DEFAULT_PAGE_SIZE
             - IntermediateResultPageView::TUPLE_INFOS_OFFSET
             - size_of::<TupleInfo>();

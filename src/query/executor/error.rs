@@ -40,6 +40,9 @@ pub enum ExecutionError {
     #[error("missing rid for delete")]
     MissingRid,
 
+    #[error("tuple is too large to fit in an intermediate result page")]
+    TupleTooBig,
+
     #[error("unsupported expression")]
     UnsupportedExpression,
 
