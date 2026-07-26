@@ -4,8 +4,8 @@ use crate::{
         binder::{
             expression::{BoundExpression, ColumnRef},
             statement::{
-                BoundDelete, BoundInsert, BoundInsertSource, BoundSelect, BoundStatement,
-                BoundUpdate,
+                BoundDelete, BoundInsert, BoundInsertSource, BoundOrderBy, BoundSelect,
+                BoundStatement, BoundUpdate,
             },
             table_ref::{BoundExpressionListRef, BoundTableRef},
         },
@@ -20,7 +20,7 @@ use crate::{
             },
             plan::{
                 DeletePlan, FilterPlan, InsertPlan, NestedLoopJoinPlan, PlanNode, PlanNodeKind,
-                ProjectionPlan, SeqScanPlan, UpdatePlan, ValuesPlan,
+                PlannedOrderBy, ProjectionPlan, SeqScanPlan, SortPlan, UpdatePlan, ValuesPlan,
             },
         },
     },
@@ -301,8 +301,34 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             }
         };
 
-        // TODO: plan ORDER BY as a sort executor.
-        let _order_by = stmt.order_by;
+        let plan = if stmt.order_by.is_empty() {
+            plan
+        } else {
+            let order_bys = stmt
+                .order_by
+                .into_iter()
+                .map(
+                    |BoundOrderBy {
+                         expression,
+                         order_by_type,
+                         null_type,
+                     }| {
+                        Ok(PlannedOrderBy {
+                            expression: (self.plan_expression(expression, &[&plan])?).1,
+                            order_by_type,
+                            null_type,
+                        })
+                    },
+                )
+                .collect::<Result<Vec<_>, PlannerError>>()?;
+            PlanNode {
+                output_schema: plan.output_schema().clone(),
+                kind: PlanNodeKind::Sort(SortPlan {
+                    child: Box::new(plan),
+                    order_bys,
+                }),
+            }
+        };
 
         Ok(plan)
     }

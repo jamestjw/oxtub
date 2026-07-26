@@ -97,6 +97,7 @@ fn format_plan_node(plan: &PlanNode, indent: usize, out: &mut String) {
             );
             format_plan_node(&nij.child, indent + 1, out);
         }
+        PlanNodeKind::Sort(sort_plan) => todo!(),
     }
 }
 

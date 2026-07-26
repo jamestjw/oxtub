@@ -143,6 +143,7 @@ impl<'catalog, 'bpm> ExecutionEngine<'catalog, 'bpm> {
                     child,
                 )))
             }
+            PlanNodeKind::Sort(sort_plan) => todo!("hook up sort executor"),
         }
     }
 }

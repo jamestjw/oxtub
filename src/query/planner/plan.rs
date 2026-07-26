@@ -1,8 +1,7 @@
 use crate::{
     catalog::{column::Column, index::IndexId, schema::Schema, table::TableId},
     query::{
-        binder::table_ref::BoundBaseTableRef, planner::expression::PlannedExpression,
-        table_ref::JoinType,
+        binder::table_ref::BoundBaseTableRef, planner::expression::PlannedExpression, statement::{OrderByNullType, OrderByType}, table_ref::JoinType
     },
 };
 
@@ -115,6 +114,7 @@ impl PlanNode {
             PlanNodeKind::NestedIndexJoin(nested_index_join_plan) => {
                 vec![nested_index_join_plan.child.as_ref()]
             }
+            PlanNodeKind::Sort(sort_plan) => vec![sort_plan.child.as_ref()],
         }
     }
 }
@@ -124,6 +124,7 @@ pub enum PlanNodeKind {
     SeqScan(SeqScanPlan),
     Filter(FilterPlan),
     Projection(ProjectionPlan),
+    Sort(SortPlan),
     Values(ValuesPlan),
     Insert(InsertPlan),
     CreateTable(CreateTablePlan),
@@ -261,4 +262,17 @@ pub struct NestedIndexJoinPlan {
     pub inner_table_schema: Schema,
     pub join_type: JoinType,
     // TODO: we should also support joins that use more than indexed columns
+}
+
+#[derive(Debug, Clone)]
+pub struct SortPlan {
+    pub child: Box<PlanNode>,
+    pub order_bys: Vec<PlannedOrderBy>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlannedOrderBy {
+    pub expression: PlannedExpression,
+    pub order_by_type: OrderByType,
+    pub null_type: OrderByNullType,
 }
