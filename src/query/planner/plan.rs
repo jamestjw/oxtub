@@ -1,7 +1,10 @@
 use crate::{
     catalog::{column::Column, index::IndexId, schema::Schema, table::TableId},
     query::{
-        binder::table_ref::BoundBaseTableRef, planner::expression::PlannedExpression, statement::{OrderByNullType, OrderByType}, table_ref::JoinType
+        binder::table_ref::BoundBaseTableRef,
+        planner::expression::PlannedExpression,
+        statement::{OrderByNullType, OrderByType},
+        table_ref::JoinType,
     },
 };
 

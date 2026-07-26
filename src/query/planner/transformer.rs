@@ -276,31 +276,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             }
         };
 
-        // Handle projections
-        let plan = {
-            let mut exprs = Vec::with_capacity(stmt.projection.len());
-            let mut names = Vec::with_capacity(stmt.projection.len());
-
-            for (idx, expr) in stmt.projection.into_iter().enumerate() {
-                let (name, expr) = self.plan_expression(expr, &[&plan])?;
-                let name = name.unwrap_or_else(|| format!("__unnamed#{idx}"));
-
-                exprs.push(expr);
-                names.push(name);
-            }
-
-            let schema =
-                ProjectionPlan::rename_schema(&ProjectionPlan::infer_proj_schema(&exprs), &names);
-
-            PlanNode {
-                output_schema: schema,
-                kind: PlanNodeKind::Projection(ProjectionPlan {
-                    expressions: exprs,
-                    child: Box::new(plan),
-                }),
-            }
-        };
-
+        // Handle ORDER BY before projection so sorting can reference non-projected columns.
         let plan = if stmt.order_by.is_empty() {
             plan
         } else {
@@ -326,6 +302,31 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                 kind: PlanNodeKind::Sort(SortPlan {
                     child: Box::new(plan),
                     order_bys,
+                }),
+            }
+        };
+
+        // Handle projections
+        let plan = {
+            let mut exprs = Vec::with_capacity(stmt.projection.len());
+            let mut names = Vec::with_capacity(stmt.projection.len());
+
+            for (idx, expr) in stmt.projection.into_iter().enumerate() {
+                let (name, expr) = self.plan_expression(expr, &[&plan])?;
+                let name = name.unwrap_or_else(|| format!("__unnamed#{idx}"));
+
+                exprs.push(expr);
+                names.push(name);
+            }
+
+            let schema =
+                ProjectionPlan::rename_schema(&ProjectionPlan::infer_proj_schema(&exprs), &names);
+
+            PlanNode {
+                output_schema: schema,
+                kind: PlanNodeKind::Projection(ProjectionPlan {
+                    expressions: exprs,
+                    child: Box::new(plan),
                 }),
             }
         };
