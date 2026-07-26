@@ -86,6 +86,7 @@ pub struct TupleInfo {
 
 impl TupleInfo {
     pub fn new(tuple_offset: usize, tuple_size: usize, tuple_meta: TupleMeta) -> Self {
+        // DEFAULT_PAGE_SIZE is 8192, so tuple offsets and sizes always fit in u16.
         Self {
             tuple_offset: tuple_offset as u16,
             tuple_size: tuple_size as u16,
@@ -249,6 +250,8 @@ impl<'a> TablePageMut<'a> {
 
     pub fn insert_tuple(&mut self, meta: &TupleMeta, tuple: &Tuple) -> Option<u16> {
         let tuple_size = tuple.size();
+        // Even empty tuples require one TupleInfo entry, so max slots is
+        // (8192 - 8) / 24 = 341, well below u16::MAX.
         let slot_id = self.num_tuples() as u16;
         if size_of::<TupleInfo>() + tuple_size <= self.free_space_end() - self.free_space_start() {
             let tuple_offset = self.free_space_end() - tuple_size;

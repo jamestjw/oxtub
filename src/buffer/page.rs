@@ -25,6 +25,12 @@ impl Page {
     pub fn data_mut(&mut self) -> &mut PageBytes {
         &mut self.data.0
     }
+    pub fn page_data(&self) -> &PageData {
+        &self.data
+    }
+    pub fn page_data_mut(&mut self) -> &mut PageData {
+        &mut self.data
+    }
     pub fn page_id(&self) -> Option<PageId> {
         self.page_id
     }
