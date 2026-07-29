@@ -48,4 +48,7 @@ pub enum ExecutionError {
 
     #[error("unsupported plan")]
     UnsupportedPlan,
+
+    #[error("executor not initialised yet")]
+    Uninitialised,
 }

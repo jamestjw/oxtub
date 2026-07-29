@@ -93,7 +93,8 @@ impl Iterator for MergeSortRunIterator<'_> {
             return None;
         }
 
-        let page_guard = match self.bpm.read_page(self.page_ids[self.page_idx]) {
+        let curr_page_id = self.page_ids[self.page_idx];
+        let page_guard = match self.bpm.read_page(curr_page_id) {
             Ok(page_guard) => page_guard,
             Err(err) => return Some(Err(err.into())),
         };
@@ -101,6 +102,10 @@ impl Iterator for MergeSortRunIterator<'_> {
 
         if self.tuple_idx >= page.num_tuples() {
             self.tuple_idx = 0;
+            drop(page_guard);
+            if let Err(e) = self.bpm.delete_page(curr_page_id) {
+                return Some(Err(e.into()));
+            }
             self.page_idx += 1;
             return self.next();
         }
@@ -112,6 +117,17 @@ impl Iterator for MergeSortRunIterator<'_> {
     }
 }
 
+impl Drop for MergeSortRunIterator<'_> {
+    fn drop(&mut self) {
+        // Cleanup in case we don't consume all the pages
+        for page_id in &self.page_ids[self.page_idx..] {
+            if let Err(err) = self.bpm.delete_page(*page_id) {
+                tracing::warn!(page_id, error = %err, "failed to delete sort run page");
+            }
+        }
+    }
+}
+
 pub struct ExternalMergeSortExecutor<'ctx, 'catalog, 'bpm, 'plan> {
     exec_ctx: &'ctx ExecutorContext<'catalog, 'bpm>,
     plan: &'plan SortPlan,
@@ -120,7 +136,6 @@ pub struct ExternalMergeSortExecutor<'ctx, 'catalog, 'bpm, 'plan> {
     comparator: TupleComparator,
     sorted_page_ids: Vec<PageId>,
     sorted_iterator: Option<MergeSortRunIterator<'bpm>>,
-    dropped_final_run: bool,
 }
 
 impl<'ctx, 'catalog, 'bpm, 'plan> ExternalMergeSortExecutor<'ctx, 'catalog, 'bpm, 'plan> {
@@ -138,7 +153,6 @@ impl<'ctx, 'catalog, 'bpm, 'plan> ExternalMergeSortExecutor<'ctx, 'catalog, 'bpm
             comparator: TupleComparator::new(plan.order_bys.clone()),
             sorted_page_ids: Vec::new(),
             sorted_iterator: None,
-            dropped_final_run: false,
         }
     }
 
@@ -248,7 +262,19 @@ impl Executor for ExternalMergeSortExecutor<'_, '_, '_, '_> {
     }
 
     fn next(&mut self, batch_size: usize) -> Result<Vec<ExecutorRow>, ExecutionError> {
-        todo!("pull sorted tuples from sorted_iterator")
+        match self.sorted_iterator.as_mut() {
+            None => Err(ExecutionError::Uninitialised),
+            Some(it) => {
+                (it.take(batch_size)
+                    .map(|tuple| {
+                        Ok(ExecutorRow {
+                            rid: None,
+                            values: tuple?.get_values(self.output_schema),
+                        })
+                    })
+                    .collect())
+            }
+        }
     }
 
     fn output_schema(&self) -> &Schema {
