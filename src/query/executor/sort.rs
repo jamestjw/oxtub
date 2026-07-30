@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::VecDeque};
+use std::{cmp::Ordering, collections::VecDeque, iter::Peekable};
 
 use crate::{
     buffer::{bpm::BufferPoolManager, page_guard::WritePageGuard},
@@ -37,11 +37,6 @@ impl TupleComparator {
     pub fn new(order_bys: Vec<PlannedOrderBy>) -> Self {
         Self { order_bys }
     }
-
-    // TODO: dont think this is needed right?
-    // pub fn compare_entries(&self, entry_a: &SortEntry, entry_b: &SortEntry) -> Ordering {
-    //     todo!("compare sort entries")
-    // }
 
     pub fn compare_keys(&self, key_a: &SortKey, key_b: &SortKey) -> Ordering {
         todo!("compare sort keys")
@@ -126,6 +121,47 @@ impl Drop for MergeSortRunIterator<'_> {
             }
         }
     }
+}
+
+fn merge_sorted_runs<'a, 'bpm>(
+    mut a: Peekable<MergeSortRunIterator<'bpm>>,
+    mut b: Peekable<MergeSortRunIterator<'bpm>>,
+    comparator: &'a TupleComparator,
+    schema: &'a Schema,
+    order_bys: &'a [PlannedOrderBy],
+) -> impl Iterator<Item = Result<Tuple, ExecutionError>> + 'a
+where
+    'bpm: 'a,
+{
+    std::iter::from_fn(move || match (a.peek(), b.peek()) {
+        (Some(Ok(x)), Some(Ok(y))) => {
+            let x_key = match generate_sort_key(x, schema, order_bys) {
+                Ok(key) => key,
+                Err(err) => {
+                    a.next();
+                    return Some(Err(err));
+                }
+            };
+            let y_key = match generate_sort_key(y, schema, order_bys) {
+                Ok(key) => key,
+                Err(err) => {
+                    b.next();
+                    return Some(Err(err));
+                }
+            };
+
+            if comparator.compare_keys(&x_key, &y_key) != Ordering::Greater {
+                a.next()
+            } else {
+                b.next()
+            }
+        }
+        (Some(Err(_)), _) => a.next(),
+        (_, Some(Err(_))) => b.next(),
+        (Some(_), None) => a.next(),
+        (None, Some(_)) => b.next(),
+        (None, None) => None,
+    })
 }
 
 pub struct ExternalMergeSortExecutor<'ctx, 'catalog, 'bpm, 'plan> {
@@ -248,7 +284,44 @@ impl Executor for ExternalMergeSortExecutor<'_, '_, '_, '_> {
 
         // We need to keep going until we have merged all runs into a single one
         while current_runs.len() > 1 {
-            todo!("finish this")
+            let mut next_runs: VecDeque<Vec<PageId>> = VecDeque::new();
+
+            // Take two runs at a time, and make a single longer run of sorted stuff
+            while !current_runs.is_empty() {
+                if current_runs.len() == 1 {
+                    next_runs.push_back(current_runs.pop_back().unwrap());
+                } else {
+                    // Both of these runs are already sorted, so we just need to merge them
+                    let run_page_ids_1 = current_runs.pop_front().unwrap();
+                    let run_page_ids_2 = current_runs.pop_front().unwrap();
+
+                    let run_1 = MergeSortRun::new(self.exec_ctx.bpm(), run_page_ids_1);
+                    let run_2 = MergeSortRun::new(self.exec_ctx.bpm(), run_page_ids_2);
+
+                    let curr_page_id = self.exec_ctx.bpm().new_page();
+                    let mut curr_page_guard = self.exec_ctx.bpm().write_page(curr_page_id)?;
+                    let mut merged_page_ids: Vec<PageId> = vec![curr_page_id];
+
+                    for tuple in merge_sorted_runs(
+                        run_1.into_iter().peekable(),
+                        run_2.into_iter().peekable(),
+                        &self.comparator,
+                        &child_schema,
+                        &self.plan.order_bys,
+                    ) {
+                        let (page_guard, new_page_id) =
+                            self.insert_into_page(curr_page_guard, tuple?)?;
+                        curr_page_guard = page_guard;
+
+                        if let Some(new_page_id) = new_page_id {
+                            merged_page_ids.push(new_page_id);
+                        }
+                    }
+
+                    next_runs.push_back(merged_page_ids);
+                }
+            }
+            current_runs = next_runs;
         }
 
         let final_sorted_run: MergeSortRun<'_> =
