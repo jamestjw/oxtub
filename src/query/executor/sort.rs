@@ -52,12 +52,13 @@ impl<'bpm> MergeSortRun<'bpm> {
     pub fn new(bpm: &'bpm BufferPoolManager, page_ids: Vec<PageId>) -> Self {
         Self { bpm, page_ids }
     }
+}
 
-    pub fn page_ids(&self) -> &[PageId] {
-        &self.page_ids
-    }
+impl<'bpm> IntoIterator for MergeSortRun<'bpm> {
+    type Item = Result<Tuple, ExecutionError>;
+    type IntoIter = MergeSortRunIterator<'bpm>;
 
-    pub fn into_iter(self) -> MergeSortRunIterator<'bpm> {
+    fn into_iter(self) -> Self::IntoIter {
         MergeSortRunIterator::new(self.bpm, self.page_ids)
     }
 }
@@ -124,33 +125,13 @@ impl Drop for MergeSortRunIterator<'_> {
 }
 
 fn merge_sorted_runs<'a, 'bpm>(
-    mut a: Peekable<MergeSortRunIterator<'bpm>>,
-    mut b: Peekable<MergeSortRunIterator<'bpm>>,
+    mut a: Peekable<impl Iterator<Item = Result<SortEntry, ExecutionError>> + 'a>,
+    mut b: Peekable<impl Iterator<Item = Result<SortEntry, ExecutionError>> + 'a>,
     comparator: &'a TupleComparator,
-    schema: &'a Schema,
-    order_bys: &'a [PlannedOrderBy],
-) -> impl Iterator<Item = Result<Tuple, ExecutionError>> + 'a
-where
-    'bpm: 'a,
-{
+) -> impl Iterator<Item = Result<SortEntry, ExecutionError>> + 'a {
     std::iter::from_fn(move || match (a.peek(), b.peek()) {
-        (Some(Ok(x)), Some(Ok(y))) => {
-            let x_key = match generate_sort_key(x, schema, order_bys) {
-                Ok(key) => key,
-                Err(err) => {
-                    a.next();
-                    return Some(Err(err));
-                }
-            };
-            let y_key = match generate_sort_key(y, schema, order_bys) {
-                Ok(key) => key,
-                Err(err) => {
-                    b.next();
-                    return Some(Err(err));
-                }
-            };
-
-            if comparator.compare_keys(&x_key, &y_key) != Ordering::Greater {
+        (Some(Ok((x_key, _))), Some(Ok((y_key, _)))) => {
+            if comparator.compare_keys(x_key, y_key) != Ordering::Greater {
                 a.next()
             } else {
                 b.next()
@@ -170,7 +151,6 @@ pub struct ExternalMergeSortExecutor<'ctx, 'catalog, 'bpm, 'plan> {
     output_schema: &'plan Schema,
     child: Box<dyn Executor + 'plan>,
     comparator: TupleComparator,
-    sorted_page_ids: Vec<PageId>,
     sorted_iterator: Option<MergeSortRunIterator<'bpm>>,
 }
 
@@ -187,7 +167,6 @@ impl<'ctx, 'catalog, 'bpm, 'plan> ExternalMergeSortExecutor<'ctx, 'catalog, 'bpm
             output_schema,
             child,
             comparator: TupleComparator::new(plan.order_bys.clone()),
-            sorted_page_ids: Vec::new(),
             sorted_iterator: None,
         }
     }
@@ -302,15 +281,27 @@ impl Executor for ExternalMergeSortExecutor<'_, '_, '_, '_> {
                     let mut curr_page_guard = self.exec_ctx.bpm().write_page(curr_page_id)?;
                     let mut merged_page_ids: Vec<PageId> = vec![curr_page_id];
 
-                    for tuple in merge_sorted_runs(
-                        run_1.into_iter().peekable(),
-                        run_2.into_iter().peekable(),
+                    let run_1_entries = run_1.into_iter().map(|tuple| {
+                        let tuple = tuple?;
+                        let sort_key =
+                            generate_sort_key(&tuple, &child_schema, &self.plan.order_bys)?;
+                        Ok((sort_key, tuple))
+                    });
+                    let run_2_entries = run_2.into_iter().map(|tuple| {
+                        let tuple = tuple?;
+                        let sort_key =
+                            generate_sort_key(&tuple, &child_schema, &self.plan.order_bys)?;
+                        Ok((sort_key, tuple))
+                    });
+
+                    for entry in merge_sorted_runs(
+                        run_1_entries.peekable(),
+                        run_2_entries.peekable(),
                         &self.comparator,
-                        &child_schema,
-                        &self.plan.order_bys,
                     ) {
+                        let (_, tuple) = entry?;
                         let (page_guard, new_page_id) =
-                            self.insert_into_page(curr_page_guard, tuple?)?;
+                            self.insert_into_page(curr_page_guard, tuple)?;
                         curr_page_guard = page_guard;
 
                         if let Some(new_page_id) = new_page_id {
@@ -324,11 +315,9 @@ impl Executor for ExternalMergeSortExecutor<'_, '_, '_, '_> {
             current_runs = next_runs;
         }
 
-        let final_sorted_run: MergeSortRun<'_> =
+        let final_sorted_run =
             MergeSortRun::new(self.exec_ctx.bpm(), current_runs.pop_back().unwrap());
 
-        // TODO: see if we end up using this field or not, might be superfluous
-        self.sorted_page_ids = final_sorted_run.page_ids().to_vec();
         self.sorted_iterator = Some(final_sorted_run.into_iter());
 
         Ok(())
