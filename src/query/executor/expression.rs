@@ -267,6 +267,17 @@ fn eval_comparison(
     Ok(Value::Boolean(res))
 }
 
+pub fn eval_comparison_is_true(
+    left: Value,
+    right: Value,
+    comparison_type: &ComparisonType,
+) -> Result<bool, ExecutionError> {
+    match expect_bool(eval_comparison(left, right, comparison_type)?)? {
+        CmpBool::True => Ok(true),
+        _ => Ok(false),
+    }
+}
+
 fn eval_numeric_comparison(
     left: Value,
     right: Value,

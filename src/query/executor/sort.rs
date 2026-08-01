@@ -9,9 +9,13 @@ use crate::{
             engine::ExecutorRow,
             error::ExecutionError,
             executor::{Executor, ExecutorContext},
-            expression::generate_sort_key,
+            expression::{eval_comparison_is_true, generate_sort_key},
         },
-        planner::plan::{PlannedOrderBy, SortPlan},
+        planner::{
+            expression::ComparisonType,
+            plan::{PlannedOrderBy, SortPlan},
+        },
+        statement::{OrderByNullType, OrderByType},
     },
     storage::{
         page::intermediate_result_page::{IntermediateResultPage, IntermediateResultPageMut},
@@ -39,7 +43,143 @@ impl TupleComparator {
     }
 
     pub fn compare_keys(&self, key_a: &SortKey, key_b: &SortKey) -> Ordering {
-        todo!("compare sort keys")
+        assert_eq!(key_a.len(), key_b.len());
+        assert_eq!(key_a.len(), self.order_bys.len());
+
+        for ((v1, v2), order_by) in key_a.iter().zip(key_b.iter()).zip(self.order_bys.iter()) {
+            match (v1.is_null(), v2.is_null(), order_by.null_type) {
+                (true, true, _) => continue,
+                (true, false, OrderByNullType::First) => return Ordering::Less,
+                (true, false, OrderByNullType::Last) => return Ordering::Greater,
+                (false, true, OrderByNullType::First) => return Ordering::Greater,
+                (false, true, OrderByNullType::Last) => return Ordering::Less,
+                (false, false, _) => (),
+            }
+
+            // TODO: this clone should not be necessary?
+            if eval_comparison_is_true(v1.clone(), v2.clone(), &ComparisonType::Eq).unwrap() {
+                continue;
+            }
+
+            if eval_comparison_is_true(v1.clone(), v2.clone(), &ComparisonType::LessThan).unwrap() {
+                return match order_by.order_by_type {
+                    OrderByType::Asc => Ordering::Less,
+                    OrderByType::Desc => Ordering::Greater,
+                };
+            } else {
+                return match order_by.order_by_type {
+                    OrderByType::Asc => Ordering::Greater,
+                    OrderByType::Desc => Ordering::Less,
+                };
+            }
+        }
+
+        Ordering::Equal
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        catalog::types::SqlType,
+        query::planner::expression::{
+            ConstantValueExpression, ExpressionType, PlannedExpression, PlannedExpressionKind,
+        },
+    };
+
+    fn order_by(order_by_type: OrderByType, null_type: OrderByNullType) -> PlannedOrderBy {
+        PlannedOrderBy {
+            expression: PlannedExpression {
+                return_type: ExpressionType {
+                    sql_type: SqlType::Integer,
+                    varchar_size: None,
+                },
+                kind: PlannedExpressionKind::ConstantValue(ConstantValueExpression {
+                    value: Value::Integer(0),
+                }),
+            },
+            order_by_type,
+            null_type,
+        }
+    }
+
+    #[test]
+    fn compares_ascending_and_descending_values() {
+        let ascending =
+            TupleComparator::new(vec![order_by(OrderByType::Asc, OrderByNullType::Last)]);
+        assert_eq!(
+            ascending.compare_keys(&vec![Value::Integer(1)], &vec![Value::Integer(2)]),
+            Ordering::Less
+        );
+        assert_eq!(
+            ascending.compare_keys(&vec![Value::Integer(2)], &vec![Value::Integer(1)]),
+            Ordering::Greater
+        );
+
+        let descending =
+            TupleComparator::new(vec![order_by(OrderByType::Desc, OrderByNullType::Last)]);
+        assert_eq!(
+            descending.compare_keys(&vec![Value::Integer(1)], &vec![Value::Integer(2)]),
+            Ordering::Greater
+        );
+        assert_eq!(
+            descending.compare_keys(&vec![Value::Integer(2)], &vec![Value::Integer(1)]),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compares_multiple_keys_lexicographically() {
+        let comparator = TupleComparator::new(vec![
+            order_by(OrderByType::Asc, OrderByNullType::Last),
+            order_by(OrderByType::Desc, OrderByNullType::Last),
+        ]);
+
+        assert_eq!(
+            comparator.compare_keys(
+                &vec![Value::Integer(1), Value::Integer(2)],
+                &vec![Value::Integer(1), Value::Integer(3)],
+            ),
+            Ordering::Greater
+        );
+        assert_eq!(
+            comparator.compare_keys(
+                &vec![Value::Integer(1), Value::Integer(2)],
+                &vec![Value::Integer(2), Value::Integer(1)],
+            ),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compares_nulls_using_null_order() {
+        let nulls_first =
+            TupleComparator::new(vec![order_by(OrderByType::Desc, OrderByNullType::First)]);
+        assert_eq!(
+            nulls_first.compare_keys(
+                &vec![Value::Null(SqlType::Integer)],
+                &vec![Value::Integer(1)],
+            ),
+            Ordering::Less
+        );
+
+        let nulls_last =
+            TupleComparator::new(vec![order_by(OrderByType::Asc, OrderByNullType::Last)]);
+        assert_eq!(
+            nulls_last.compare_keys(
+                &vec![Value::Null(SqlType::Integer)],
+                &vec![Value::Integer(1)],
+            ),
+            Ordering::Greater
+        );
+        assert_eq!(
+            nulls_last.compare_keys(
+                &vec![Value::Null(SqlType::Integer)],
+                &vec![Value::Null(SqlType::Integer)],
+            ),
+            Ordering::Equal
+        );
     }
 }
 
