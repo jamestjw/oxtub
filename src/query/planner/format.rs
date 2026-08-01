@@ -97,8 +97,29 @@ fn format_plan_node(plan: &PlanNode, indent: usize, out: &mut String) {
             );
             format_plan_node(&nij.child, indent + 1, out);
         }
-        PlanNodeKind::Sort(sort_plan) => todo!(),
+        PlanNodeKind::Sort(sort_plan) => {
+            let order_bys = sort_plan
+                .order_bys
+                .iter()
+                .map(format_order_by)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "Sort order_bys=[{order_bys}]");
+            format_plan_node(&sort_plan.child, indent + 1, out);
+        }
     }
+}
+
+fn format_order_by(order_by: &crate::query::planner::plan::PlannedOrderBy) -> String {
+    let order = match order_by.order_by_type {
+        crate::query::statement::OrderByType::Asc => "ASC",
+        crate::query::statement::OrderByType::Desc => "DESC",
+    };
+    let nulls = match order_by.null_type {
+        crate::query::statement::OrderByNullType::First => "NULLS FIRST",
+        crate::query::statement::OrderByNullType::Last => "NULLS LAST",
+    };
+    format!("{} {order} {nulls}", format_expr(&order_by.expression))
 }
 
 fn format_expr(expr: &PlannedExpression) -> String {

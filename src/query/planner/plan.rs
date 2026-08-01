@@ -38,6 +38,10 @@ impl PlanNode {
                 expressions: expressions.clone(),
                 child: Box::new(children.pop().unwrap()),
             }),
+            PlanNodeKind::Sort(sort_plan) if children.len() == 1 => PlanNodeKind::Sort(SortPlan {
+                child: Box::new(children.pop().unwrap()),
+                order_bys: sort_plan.order_bys.clone(),
+            }),
             PlanNodeKind::Values(values_plan) if children.is_empty() => {
                 PlanNodeKind::Values(values_plan.clone())
             }

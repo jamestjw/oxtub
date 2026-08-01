@@ -212,3 +212,4 @@ slt_test!(
     nested_index_join_slt,
     "../../test/sql/06-nested-index-join.slt"
 );
+slt_test!(order_by_slt, "../../test/sql/07-order-by.slt");
