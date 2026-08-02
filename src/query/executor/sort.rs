@@ -78,111 +78,6 @@ impl TupleComparator {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        catalog::types::SqlType,
-        query::planner::expression::{
-            ConstantValueExpression, ExpressionType, PlannedExpression, PlannedExpressionKind,
-        },
-    };
-
-    fn order_by(order_by_type: OrderByType, null_type: OrderByNullType) -> PlannedOrderBy {
-        PlannedOrderBy {
-            expression: PlannedExpression {
-                return_type: ExpressionType {
-                    sql_type: SqlType::Integer,
-                    varchar_size: None,
-                },
-                kind: PlannedExpressionKind::ConstantValue(ConstantValueExpression {
-                    value: Value::Integer(0),
-                }),
-            },
-            order_by_type,
-            null_type,
-        }
-    }
-
-    #[test]
-    fn compares_ascending_and_descending_values() {
-        let ascending =
-            TupleComparator::new(vec![order_by(OrderByType::Asc, OrderByNullType::Last)]);
-        assert_eq!(
-            ascending.compare_keys(&vec![Value::Integer(1)], &vec![Value::Integer(2)]),
-            Ordering::Less
-        );
-        assert_eq!(
-            ascending.compare_keys(&vec![Value::Integer(2)], &vec![Value::Integer(1)]),
-            Ordering::Greater
-        );
-
-        let descending =
-            TupleComparator::new(vec![order_by(OrderByType::Desc, OrderByNullType::Last)]);
-        assert_eq!(
-            descending.compare_keys(&vec![Value::Integer(1)], &vec![Value::Integer(2)]),
-            Ordering::Greater
-        );
-        assert_eq!(
-            descending.compare_keys(&vec![Value::Integer(2)], &vec![Value::Integer(1)]),
-            Ordering::Less
-        );
-    }
-
-    #[test]
-    fn compares_multiple_keys_lexicographically() {
-        let comparator = TupleComparator::new(vec![
-            order_by(OrderByType::Asc, OrderByNullType::Last),
-            order_by(OrderByType::Desc, OrderByNullType::Last),
-        ]);
-
-        assert_eq!(
-            comparator.compare_keys(
-                &vec![Value::Integer(1), Value::Integer(2)],
-                &vec![Value::Integer(1), Value::Integer(3)],
-            ),
-            Ordering::Greater
-        );
-        assert_eq!(
-            comparator.compare_keys(
-                &vec![Value::Integer(1), Value::Integer(2)],
-                &vec![Value::Integer(2), Value::Integer(1)],
-            ),
-            Ordering::Less
-        );
-    }
-
-    #[test]
-    fn compares_nulls_using_null_order() {
-        let nulls_first =
-            TupleComparator::new(vec![order_by(OrderByType::Desc, OrderByNullType::First)]);
-        assert_eq!(
-            nulls_first.compare_keys(
-                &vec![Value::Null(SqlType::Integer)],
-                &vec![Value::Integer(1)],
-            ),
-            Ordering::Less
-        );
-
-        let nulls_last =
-            TupleComparator::new(vec![order_by(OrderByType::Asc, OrderByNullType::Last)]);
-        assert_eq!(
-            nulls_last.compare_keys(
-                &vec![Value::Null(SqlType::Integer)],
-                &vec![Value::Integer(1)],
-            ),
-            Ordering::Greater
-        );
-        assert_eq!(
-            nulls_last.compare_keys(
-                &vec![Value::Null(SqlType::Integer)],
-                &vec![Value::Null(SqlType::Integer)],
-            ),
-            Ordering::Equal
-        );
-    }
-}
-
 pub struct MergeSortRun<'bpm> {
     bpm: &'bpm BufferPoolManager,
     page_ids: Vec<PageId>,
@@ -481,5 +376,157 @@ impl Executor for ExternalMergeSortExecutor<'_, '_, '_, '_> {
 
     fn output_schema(&self) -> &Schema {
         self.output_schema
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
+        query::{
+            engine::{QueryEngine, QueryResult},
+            planner::expression::{
+                ConstantValueExpression, ExpressionType, PlannedExpression, PlannedExpressionKind,
+            },
+        },
+        storage::table::tuple::{Tuple, TupleMeta},
+        testing::setup_bpm,
+    };
+
+    fn order_by(order_by_type: OrderByType, null_type: OrderByNullType) -> PlannedOrderBy {
+        PlannedOrderBy {
+            expression: PlannedExpression {
+                return_type: ExpressionType {
+                    sql_type: SqlType::Integer,
+                    varchar_size: None,
+                },
+                kind: PlannedExpressionKind::ConstantValue(ConstantValueExpression {
+                    value: Value::Integer(0),
+                }),
+            },
+            order_by_type,
+            null_type,
+        }
+    }
+
+    #[test]
+    fn compares_ascending_and_descending_values() {
+        let ascending =
+            TupleComparator::new(vec![order_by(OrderByType::Asc, OrderByNullType::Last)]);
+        assert_eq!(
+            ascending.compare_keys(&vec![Value::Integer(1)], &vec![Value::Integer(2)]),
+            Ordering::Less
+        );
+        assert_eq!(
+            ascending.compare_keys(&vec![Value::Integer(2)], &vec![Value::Integer(1)]),
+            Ordering::Greater
+        );
+
+        let descending =
+            TupleComparator::new(vec![order_by(OrderByType::Desc, OrderByNullType::Last)]);
+        assert_eq!(
+            descending.compare_keys(&vec![Value::Integer(1)], &vec![Value::Integer(2)]),
+            Ordering::Greater
+        );
+        assert_eq!(
+            descending.compare_keys(&vec![Value::Integer(2)], &vec![Value::Integer(1)]),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compares_multiple_keys_lexicographically() {
+        let comparator = TupleComparator::new(vec![
+            order_by(OrderByType::Asc, OrderByNullType::Last),
+            order_by(OrderByType::Desc, OrderByNullType::Last),
+        ]);
+
+        assert_eq!(
+            comparator.compare_keys(
+                &vec![Value::Integer(1), Value::Integer(2)],
+                &vec![Value::Integer(1), Value::Integer(3)],
+            ),
+            Ordering::Greater
+        );
+        assert_eq!(
+            comparator.compare_keys(
+                &vec![Value::Integer(1), Value::Integer(2)],
+                &vec![Value::Integer(2), Value::Integer(1)],
+            ),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compares_nulls_using_null_order() {
+        let nulls_first =
+            TupleComparator::new(vec![order_by(OrderByType::Desc, OrderByNullType::First)]);
+        assert_eq!(
+            nulls_first.compare_keys(
+                &vec![Value::Null(SqlType::Integer)],
+                &vec![Value::Integer(1)],
+            ),
+            Ordering::Less
+        );
+
+        let nulls_last =
+            TupleComparator::new(vec![order_by(OrderByType::Asc, OrderByNullType::Last)]);
+        assert_eq!(
+            nulls_last.compare_keys(
+                &vec![Value::Null(SqlType::Integer)],
+                &vec![Value::Integer(1)],
+            ),
+            Ordering::Greater
+        );
+        assert_eq!(
+            nulls_last.compare_keys(
+                &vec![Value::Null(SqlType::Integer)],
+                &vec![Value::Null(SqlType::Integer)],
+            ),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn sorts_rows_across_multiple_intermediate_pages() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        let schema = Schema::new(&[Column::new_static("value".to_string(), SqlType::Integer)]);
+        catalog
+            .create_tbl("numbers".to_string(), schema.clone())
+            .unwrap();
+
+        {
+            let table = catalog.get_tbl_by_name("numbers").unwrap();
+            for value in (0..1000).rev() {
+                let tuple = Tuple::from_values(&[Value::Integer(value)], &schema);
+                table
+                    .table_heap
+                    .insert_tuple(&TupleMeta::new(0, false), &tuple)
+                    .unwrap();
+            }
+        }
+
+        let mut engine = QueryEngine::new(&mut catalog);
+        let QueryResult::Rows(result) = engine
+            .execute_sql_with_batch_size("select value from numbers order by value asc", 17)
+            .unwrap()
+        else {
+            panic!("ORDER BY query did not return rows");
+        };
+
+        let values = result
+            .rows
+            .into_iter()
+            .map(|row| row.values)
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1000);
+        assert!(
+            values
+                .into_iter()
+                .enumerate()
+                .all(|(expected, row)| row == vec![Value::Integer(expected as i32)])
+        );
     }
 }
