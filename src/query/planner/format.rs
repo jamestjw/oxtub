@@ -107,6 +107,10 @@ fn format_plan_node(plan: &PlanNode, indent: usize, out: &mut String) {
             let _ = writeln!(out, "Sort order_bys=[{order_bys}]");
             format_plan_node(&sort_plan.child, indent + 1, out);
         }
+        PlanNodeKind::Limit(limit_plan) => {
+            let _ = writeln!(out, "Limit count={}", format_expr(&limit_plan.limit));
+            format_plan_node(&limit_plan.child, indent + 1, out);
+        }
     }
 }
 

@@ -7,6 +7,7 @@ use crate::{
             executor::{Executor, ExecutorContext},
             filter::FilterExecutor,
             insert::InsertExecutor,
+            limit::LimitExecutor,
             nested_index_join::NestedIndexJoinExecutor,
             nested_loop_join::NestedLoopJoinExecutor,
             projection::ProjectionExecutor,
@@ -149,6 +150,14 @@ impl<'catalog, 'bpm> ExecutionEngine<'catalog, 'bpm> {
                 Ok(Box::new(ExternalMergeSortExecutor::new(
                     &self.exec_ctx,
                     sort_plan,
+                    plan.output_schema(),
+                    child,
+                )))
+            }
+            PlanNodeKind::Limit(limit_plan) => {
+                let child = self.create_executor(&limit_plan.child)?;
+                Ok(Box::new(LimitExecutor::new(
+                    limit_plan,
                     plan.output_schema(),
                     child,
                 )))

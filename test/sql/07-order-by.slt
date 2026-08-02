@@ -1,10 +1,18 @@
-# LIMIT coverage can be added here once SELECT LIMIT is implemented.
+# LIMIT and ORDER BY coverage.
 
 query
 explain select col1, col2 from test_simple_seq_2 order by col2 desc;
 ----
 Sort order_bys=[#0.1 DESC NULLS FIRST]
   SeqScan table=test_simple_seq_2
+
+query
+explain select col1 from test_simple_seq_2 order by col1 desc limit 3;
+----
+Limit count=3
+  Projection exprs=[#0.0]
+    Sort order_bys=[#0.0 DESC NULLS FIRST]
+      SeqScan table=test_simple_seq_2
 
 query
 select col1, col2 from test_simple_seq_2 order by col2 desc;
@@ -47,3 +55,51 @@ select col1, col2 from test_simple_seq_2 order by col1 desc, col2 asc;
 2 12
 1 11
 0 10
+
+query
+select col1, col2 from test_simple_seq_2 order by col1 desc limit 3;
+----
+9 19
+8 18
+7 17
+
+query
+select col1 from test_simple_seq_2 limit 2 + 3;
+----
+0
+1
+2
+3
+4
+
+query
+select col1 from test_simple_seq_2 limit 0;
+----
+
+query
+select col1 from test_simple_seq_2 limit 20;
+----
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+query
+select col1 from test_simple_seq_2 limit null;
+----
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9

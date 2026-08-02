@@ -42,6 +42,12 @@ impl PlanNode {
                 child: Box::new(children.pop().unwrap()),
                 order_bys: sort_plan.order_bys.clone(),
             }),
+            PlanNodeKind::Limit(limit_plan) if children.len() == 1 => {
+                PlanNodeKind::Limit(LimitPlan {
+                    child: Box::new(children.pop().unwrap()),
+                    limit: limit_plan.limit.clone(),
+                })
+            }
             PlanNodeKind::Values(values_plan) if children.is_empty() => {
                 PlanNodeKind::Values(values_plan.clone())
             }
@@ -122,6 +128,7 @@ impl PlanNode {
                 vec![nested_index_join_plan.child.as_ref()]
             }
             PlanNodeKind::Sort(sort_plan) => vec![sort_plan.child.as_ref()],
+            PlanNodeKind::Limit(limit_plan) => vec![limit_plan.child.as_ref()],
         }
     }
 }
@@ -132,6 +139,7 @@ pub enum PlanNodeKind {
     Filter(FilterPlan),
     Projection(ProjectionPlan),
     Sort(SortPlan),
+    Limit(LimitPlan),
     Values(ValuesPlan),
     Insert(InsertPlan),
     CreateTable(CreateTablePlan),
@@ -275,6 +283,12 @@ pub struct NestedIndexJoinPlan {
 pub struct SortPlan {
     pub child: Box<PlanNode>,
     pub order_bys: Vec<PlannedOrderBy>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LimitPlan {
+    pub child: Box<PlanNode>,
+    pub limit: PlannedExpression,
 }
 
 #[derive(Debug, Clone)]

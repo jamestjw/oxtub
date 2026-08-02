@@ -19,8 +19,9 @@ use crate::{
                 PlannedExpression, PlannedExpressionKind,
             },
             plan::{
-                DeletePlan, FilterPlan, InsertPlan, NestedLoopJoinPlan, PlanNode, PlanNodeKind,
-                PlannedOrderBy, ProjectionPlan, SeqScanPlan, SortPlan, UpdatePlan, ValuesPlan,
+                DeletePlan, FilterPlan, InsertPlan, LimitPlan, NestedLoopJoinPlan, PlanNode,
+                PlanNodeKind, PlannedOrderBy, ProjectionPlan, SeqScanPlan, SortPlan, UpdatePlan,
+                ValuesPlan,
             },
         },
     },
@@ -329,6 +330,20 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                     child: Box::new(plan),
                 }),
             }
+        };
+
+        let plan = match stmt.limit {
+            Some(limit) => {
+                let (_, limit) = self.plan_expression(limit, &[&plan])?;
+                PlanNode {
+                    output_schema: plan.output_schema().clone(),
+                    kind: PlanNodeKind::Limit(LimitPlan {
+                        child: Box::new(plan),
+                        limit,
+                    }),
+                }
+            }
+            None => plan,
         };
 
         Ok(plan)

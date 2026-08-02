@@ -31,6 +31,9 @@ pub enum ExecutionError {
     #[error("expected integer expression, got {0:?}")]
     ExpectedInteger(Value),
 
+    #[error("limit must not be negative")]
+    NegativeLimit,
+
     #[error("cannot compare values {0:?} and {1:?}")]
     ComparisonTypeMismatch(Value, Value),
 
