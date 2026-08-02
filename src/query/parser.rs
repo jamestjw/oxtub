@@ -1,9 +1,10 @@
 use sqlparser::{
     ast::{
         AssignmentTarget, BinaryOperator as SqlBinaryOperator, CharacterLength, ColumnOption,
-        DataType, Expr as SqlExpr, FromTable, Ident, IndexColumn, Join, JoinConstraint,
-        JoinOperator, LimitClause, ObjectName, OrderBy, OrderByExpr as SqlOrderByExpr, OrderByKind,
-        Query, Select, SelectItem as SqlSelectItem, SetExpr, Statement as SqlStatement, TableAlias,
+        DataType, Expr as SqlExpr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
+        GroupByExpr, Ident, IndexColumn, Join, JoinConstraint, JoinOperator, LimitClause,
+        ObjectName, OrderBy, OrderByExpr as SqlOrderByExpr, OrderByKind, Query, Select,
+        SelectItem as SqlSelectItem, SetExpr, Statement as SqlStatement, TableAlias,
         TableConstraint, TableFactor, TableObject, TableWithJoins,
         UnaryOperator as SqlUnaryOperator, Value as SqlValue,
     },
@@ -131,14 +132,27 @@ fn convert_select(
         .map(convert_select_item)
         .collect::<Result<Vec<_>, _>>()?;
     let where_clause = select.selection.map(convert_expr).transpose()?;
+    let group_by = convert_group_by(select.group_by)?;
 
     Ok(SelectStatement {
         table: convert_table_with_joins(table)?,
         projection,
         where_clause,
+        group_by,
         order_by,
         limit,
     })
+}
+
+fn convert_group_by(group_by: GroupByExpr) -> Result<Vec<Expression>, QueryError> {
+    match group_by {
+        GroupByExpr::Expressions(expressions, modifiers) if modifiers.is_empty() => {
+            expressions.into_iter().map(convert_expr).collect()
+        }
+        GroupByExpr::Expressions(_, _) | GroupByExpr::All(_) => Err(QueryError::UnsupportedQuery(
+            "only GROUP BY expressions are supported",
+        )),
+    }
 }
 
 fn convert_limit_clause(
@@ -490,6 +504,7 @@ fn convert_expr(expr: SqlExpr) -> Result<Expression, QueryError> {
         })),
         SqlExpr::CompoundIdentifier(idents) => convert_compound_column_ref(idents),
         SqlExpr::Value(value) => convert_value(value.into()),
+        SqlExpr::Function(function) => convert_aggregate(function),
         SqlExpr::UnaryOp { op, expr } => Ok(Expression::UnaryOp {
             op: convert_unary_op(op)?,
             expr: Box::new(convert_expr(*expr)?),
@@ -508,6 +523,48 @@ fn convert_expr(expr: SqlExpr) -> Result<Expression, QueryError> {
             expr: Box::new(convert_expr(*expr)?),
         }),
         SqlExpr::Nested(expr) => convert_expr(*expr),
+        _ => Err(QueryError::UnsupportedExpression),
+    }
+}
+
+fn convert_aggregate(function: sqlparser::ast::Function) -> Result<Expression, QueryError> {
+    if function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return Err(QueryError::UnsupportedExpression);
+    }
+
+    let name =
+        simple_object_name_to_string(&function.name).ok_or(QueryError::UnsupportedExpression)?;
+    let name = name.to_ascii_lowercase();
+    let FunctionArguments::List(arguments) = function.args else {
+        return Err(QueryError::UnsupportedExpression);
+    };
+
+    if arguments.duplicate_treatment.is_some() || !arguments.clauses.is_empty() {
+        return Err(QueryError::UnsupportedExpression);
+    }
+
+    let mut args = arguments.args.into_iter();
+    let argument = match args.next() {
+        Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))) => Some(convert_expr(expr)?),
+        Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) => None,
+        _ => return Err(QueryError::UnsupportedExpression),
+    };
+    if args.next().is_some() {
+        return Err(QueryError::UnsupportedExpression);
+    }
+
+    match (name.as_str(), argument) {
+        ("count", None) => Ok(Expression::CountStarAggregate),
+        ("count", Some(argument)) => Ok(Expression::CountAggregate(Box::new(argument))),
+        ("sum", Some(argument)) => Ok(Expression::SumAggregate(Box::new(argument))),
+        ("min", Some(argument)) => Ok(Expression::MinAggregate(Box::new(argument))),
+        ("max", Some(argument)) => Ok(Expression::MaxAggregate(Box::new(argument))),
         _ => Err(QueryError::UnsupportedExpression),
     }
 }
@@ -753,6 +810,7 @@ mod tests {
                         Wildcard,
                     ],
                     where_clause: None,
+                    group_by: [],
                     order_by: [],
                     limit: None,
                 },
@@ -790,6 +848,7 @@ mod tests {
                         ),
                     ],
                     where_clause: None,
+                    group_by: [],
                     order_by: [],
                     limit: None,
                 },
@@ -845,6 +904,7 @@ mod tests {
                         Wildcard,
                     ],
                     where_clause: None,
+                    group_by: [],
                     order_by: [],
                     limit: None,
                 },
@@ -855,18 +915,18 @@ mod tests {
             parse_sql("select * from users inner join orders on users.id = orders.user_id")
                 .unwrap();
 
-        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: None }, right: BaseTable { table_name: "orders", alias: None }, join_type: Inner, condition: Some(BinaryOp { left: Column(ParsedColumnRef { qualifier: Some(Table { table: "users" }), column: "id" }), op: Eq, right: Column(ParsedColumnRef { qualifier: Some(Table { table: "orders" }), column: "user_id" }) }) }, projection: [Wildcard], where_clause: None, order_by: [], limit: None })"#]]
+        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: None }, right: BaseTable { table_name: "orders", alias: None }, join_type: Inner, condition: Some(BinaryOp { left: Column(ParsedColumnRef { qualifier: Some(Table { table: "users" }), column: "id" }), op: Eq, right: Column(ParsedColumnRef { qualifier: Some(Table { table: "orders" }), column: "user_id" }) }) }, projection: [Wildcard], where_clause: None, group_by: [], order_by: [], limit: None })"#]]
             .assert_eq(&format!("{statement:?}"));
 
         let statement =
             parse_sql("select * from users left join orders on users.id = orders.user_id").unwrap();
 
-        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: None }, right: BaseTable { table_name: "orders", alias: None }, join_type: Left, condition: Some(BinaryOp { left: Column(ParsedColumnRef { qualifier: Some(Table { table: "users" }), column: "id" }), op: Eq, right: Column(ParsedColumnRef { qualifier: Some(Table { table: "orders" }), column: "user_id" }) }) }, projection: [Wildcard], where_clause: None, order_by: [], limit: None })"#]]
+        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: None }, right: BaseTable { table_name: "orders", alias: None }, join_type: Left, condition: Some(BinaryOp { left: Column(ParsedColumnRef { qualifier: Some(Table { table: "users" }), column: "id" }), op: Eq, right: Column(ParsedColumnRef { qualifier: Some(Table { table: "orders" }), column: "user_id" }) }) }, projection: [Wildcard], where_clause: None, group_by: [], order_by: [], limit: None })"#]]
             .assert_eq(&format!("{statement:?}"));
 
         let statement = parse_sql("select * from users cross join orders").unwrap();
 
-        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: None }, right: BaseTable { table_name: "orders", alias: None }, join_type: Cross, condition: None }, projection: [Wildcard], where_clause: None, order_by: [], limit: None })"#]]
+        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: None }, right: BaseTable { table_name: "orders", alias: None }, join_type: Cross, condition: None }, projection: [Wildcard], where_clause: None, group_by: [], order_by: [], limit: None })"#]]
             .assert_eq(&format!("{statement:?}"));
     }
 
@@ -875,7 +935,7 @@ mod tests {
         let statement =
             parse_sql("select * from users u join orders o on u.id = o.user_id").unwrap();
 
-        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: Some("u") }, right: BaseTable { table_name: "orders", alias: Some("o") }, join_type: Inner, condition: Some(BinaryOp { left: Column(ParsedColumnRef { qualifier: Some(Table { table: "u" }), column: "id" }), op: Eq, right: Column(ParsedColumnRef { qualifier: Some(Table { table: "o" }), column: "user_id" }) }) }, projection: [Wildcard], where_clause: None, order_by: [], limit: None })"#]]
+        expect![[r#"Select(SelectStatement { table: Join { left: BaseTable { table_name: "users", alias: Some("u") }, right: BaseTable { table_name: "orders", alias: Some("o") }, join_type: Inner, condition: Some(BinaryOp { left: Column(ParsedColumnRef { qualifier: Some(Table { table: "u" }), column: "id" }), op: Eq, right: Column(ParsedColumnRef { qualifier: Some(Table { table: "o" }), column: "user_id" }) }) }, projection: [Wildcard], where_clause: None, group_by: [], order_by: [], limit: None })"#]]
             .assert_eq(&format!("{statement:?}"));
     }
 
@@ -899,7 +959,7 @@ mod tests {
             parse_sql("select not active, -score, name is null, name is not null from users")
                 .unwrap();
 
-        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(UnaryOp { op: Not, expr: Column(ParsedColumnRef { qualifier: None, column: "active" }) }), Expression(UnaryOp { op: Neg, expr: Column(ParsedColumnRef { qualifier: None, column: "score" }) }), Expression(UnaryOp { op: IsNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) }), Expression(UnaryOp { op: IsNotNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) })], where_clause: None, order_by: [], limit: None })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(UnaryOp { op: Not, expr: Column(ParsedColumnRef { qualifier: None, column: "active" }) }), Expression(UnaryOp { op: Neg, expr: Column(ParsedColumnRef { qualifier: None, column: "score" }) }), Expression(UnaryOp { op: IsNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) }), Expression(UnaryOp { op: IsNotNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) })], where_clause: None, group_by: [], order_by: [], limit: None })"#]]
             .assert_eq(&format!("{statement:?}"));
     }
 
@@ -907,7 +967,7 @@ mod tests {
     fn parses_select_projection_arithmetic_operators() {
         let statement = parse_sql("select score + 1, score - 1, -score + 1 from users").unwrap();
 
-        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(BinaryOp { left: Column(ParsedColumnRef { qualifier: None, column: "score" }), op: Plus, right: Literal(Integer(1)) }), Expression(BinaryOp { left: Column(ParsedColumnRef { qualifier: None, column: "score" }), op: Minus, right: Literal(Integer(1)) }), Expression(BinaryOp { left: UnaryOp { op: Neg, expr: Column(ParsedColumnRef { qualifier: None, column: "score" }) }, op: Plus, right: Literal(Integer(1)) })], where_clause: None, order_by: [], limit: None })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(BinaryOp { left: Column(ParsedColumnRef { qualifier: None, column: "score" }), op: Plus, right: Literal(Integer(1)) }), Expression(BinaryOp { left: Column(ParsedColumnRef { qualifier: None, column: "score" }), op: Minus, right: Literal(Integer(1)) }), Expression(BinaryOp { left: UnaryOp { op: Neg, expr: Column(ParsedColumnRef { qualifier: None, column: "score" }) }, op: Plus, right: Literal(Integer(1)) })], where_clause: None, group_by: [], order_by: [], limit: None })"#]]
             .assert_eq(&format!("{statement:?}"));
     }
 
@@ -948,6 +1008,7 @@ mod tests {
                             ),
                         },
                     ),
+                    group_by: [],
                     order_by: [],
                     limit: None,
                 },
@@ -959,27 +1020,27 @@ mod tests {
     fn parses_select_where_unary_operators() {
         let statement = parse_sql("select id from users where not active").unwrap();
 
-        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: Not, expr: Column(ParsedColumnRef { qualifier: None, column: "active" }) }), order_by: [], limit: None })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: Not, expr: Column(ParsedColumnRef { qualifier: None, column: "active" }) }), group_by: [], order_by: [], limit: None })"#]]
             .assert_eq(&format!("{statement:?}"));
 
         let statement = parse_sql("select id from users where -score = 1").unwrap();
 
-        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(BinaryOp { left: UnaryOp { op: Neg, expr: Column(ParsedColumnRef { qualifier: None, column: "score" }) }, op: Eq, right: Literal(Integer(1)) }), order_by: [], limit: None })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(BinaryOp { left: UnaryOp { op: Neg, expr: Column(ParsedColumnRef { qualifier: None, column: "score" }) }, op: Eq, right: Literal(Integer(1)) }), group_by: [], order_by: [], limit: None })"#]]
             .assert_eq(&format!("{statement:?}"));
 
         let statement = parse_sql("select id from users where name is null").unwrap();
 
-        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: IsNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) }), order_by: [], limit: None })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: IsNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) }), group_by: [], order_by: [], limit: None })"#]]
             .assert_eq(&format!("{statement:?}"));
 
         let statement = parse_sql("select id from users where name is not null").unwrap();
 
-        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: IsNotNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) }), order_by: [], limit: None })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: IsNotNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) }), group_by: [], order_by: [], limit: None })"#]]
             .assert_eq(&format!("{statement:?}"));
 
         let statement = parse_sql("select id from users where not (name is null)").unwrap();
 
-        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: Not, expr: UnaryOp { op: IsNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) } }), order_by: [], limit: None })"#]]
+        expect![[r#"Select(SelectStatement { table: BaseTable { table_name: "users", alias: None }, projection: [Expression(Column(ParsedColumnRef { qualifier: None, column: "id" }))], where_clause: Some(UnaryOp { op: Not, expr: UnaryOp { op: IsNull, expr: Column(ParsedColumnRef { qualifier: None, column: "name" }) } }), group_by: [], order_by: [], limit: None })"#]]
             .assert_eq(&format!("{statement:?}"));
     }
 
@@ -1034,6 +1095,58 @@ mod tests {
         for sql in [
             "select id from users limit 5 offset 1",
             "select id from users limit 1, 5",
+        ] {
+            assert!(parse_sql(sql).is_err(), "unexpected result for {sql}");
+        }
+    }
+
+    #[test]
+    fn parses_group_by_and_supported_aggregates() {
+        let Statement::Select(select) = parse_sql(
+            "select count(*), count(id), sum(id), min(id), max(id) from users group by id + 1",
+        )
+        .unwrap() else {
+            panic!("expected select statement");
+        };
+
+        assert!(matches!(
+            select.projection[0],
+            SelectItem::Expression(Expression::CountStarAggregate)
+        ));
+        assert!(matches!(
+            select.projection[1],
+            SelectItem::Expression(Expression::CountAggregate(_))
+        ));
+        assert!(matches!(
+            select.projection[2],
+            SelectItem::Expression(Expression::SumAggregate(_))
+        ));
+        assert!(matches!(
+            select.projection[3],
+            SelectItem::Expression(Expression::MinAggregate(_))
+        ));
+        assert!(matches!(
+            select.projection[4],
+            SelectItem::Expression(Expression::MaxAggregate(_))
+        ));
+        assert!(matches!(
+            select.group_by.as_slice(),
+            [Expression::BinaryOp {
+                op: BinaryOperator::Plus,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_aggregate_forms_and_grouping() {
+        for sql in [
+            "select avg(id) from users",
+            "select count(distinct id) from users",
+            "select count(id, id) from users",
+            "select sum(*) from users",
+            "select count() from users",
+            "select count(id) from users group by all",
         ] {
             assert!(parse_sql(sql).is_err(), "unexpected result for {sql}");
         }
@@ -1175,6 +1288,7 @@ mod tests {
                                 Wildcard,
                             ],
                             where_clause: None,
+                            group_by: [],
                             order_by: [],
                             limit: None,
                         },

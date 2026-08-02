@@ -25,6 +25,7 @@ pub struct SelectStatement {
     pub table: TableRef,
     pub projection: Vec<SelectItem>,
     pub where_clause: Option<Expression>,
+    pub group_by: Vec<Expression>,
     pub order_by: Vec<OrderByItem>,
     pub limit: Option<Expression>,
 }

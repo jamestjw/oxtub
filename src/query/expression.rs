@@ -4,6 +4,11 @@ use crate::types::value::Value;
 pub enum Expression {
     Column(ParsedColumnRef),
     Literal(Value),
+    CountStarAggregate,
+    CountAggregate(Box<Expression>),
+    SumAggregate(Box<Expression>),
+    MinAggregate(Box<Expression>),
+    MaxAggregate(Box<Expression>),
     UnaryOp {
         op: UnaryOperator,
         expr: Box<Expression>,

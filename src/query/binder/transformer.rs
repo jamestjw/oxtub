@@ -422,6 +422,13 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
                 op,
                 right: Box::new(self.bind_expression(*right, context)?),
             }),
+            Expression::CountStarAggregate
+            | Expression::CountAggregate(_)
+            | Expression::SumAggregate(_)
+            | Expression::MinAggregate(_)
+            | Expression::MaxAggregate(_) => Err(BinderError::UnsupportedExpression(
+                "aggregate expressions are not supported yet".into(),
+            )),
         }
     }
 
@@ -1547,6 +1554,7 @@ mod tests {
             },
             projection: vec![],
             where_clause: None,
+            group_by: vec![],
             order_by: vec![],
             limit: None,
         });
