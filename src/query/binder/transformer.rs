@@ -171,12 +171,17 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
             .map(|expr| self.bind_expression(expr, &context))
             .transpose()?;
         let order_by = self.bind_order_by_list(stmt.order_by, &context)?;
+        let limit = stmt
+            .limit
+            .map(|expr| self.bind_expression(expr, &BindContext::no_scope()))
+            .transpose()?;
 
         Ok(BoundSelect {
             table: tbl_ref,
             projection,
             where_,
             order_by,
+            limit,
         })
     }
 
@@ -595,10 +600,12 @@ mod tests {
         catalog::{column::Column, schema::Schema},
         query::{
             binder::statement::BoundStatement,
+            expression::BinaryOperator,
             parser::parse_sql,
             statement::{OrderByNullType, OrderByType},
         },
         testing::setup_bpm,
+        types::value::Value,
     };
 
     use super::*;
@@ -1252,6 +1259,49 @@ mod tests {
     }
 
     #[test]
+    fn binds_select_limit_without_columns() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("select id from users limit 1 + 2").unwrap();
+
+        let BoundStatement::Select(select) = binder.bind_statement(statement).unwrap() else {
+            panic!("expected select statement");
+        };
+
+        assert!(matches!(
+            select.limit,
+            Some(BoundExpression::BinaryOp {
+                left,
+                right,
+                op: BinaryOperator::Plus,
+            }) if matches!(*left, BoundExpression::Literal(Value::Integer(1)))
+                && matches!(*right, BoundExpression::Literal(Value::Integer(2)))
+        ));
+    }
+
+    #[test]
+    fn rejects_column_references_in_select_limit() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+
+        for sql in [
+            "select id from users limit id",
+            "select id from users limit 1 + id",
+        ] {
+            let statement = parse_sql(sql).unwrap();
+            let err = unwrap_binder_err(binder.bind_statement(statement));
+            assert!(
+                matches!(err, BinderError::UnsupportedExpression(ref message) if message.contains("column reference")),
+                "unexpected error for {sql}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn binds_update_with_assignments_and_where_clause() {
         let bpm = setup_bpm(3);
         let mut catalog = Catalog::new(&bpm);
@@ -1498,6 +1548,7 @@ mod tests {
             projection: vec![],
             where_clause: None,
             order_by: vec![],
+            limit: None,
         });
         let err = unwrap_binder_err(binder.bind_statement(statement));
 

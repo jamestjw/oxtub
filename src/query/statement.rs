@@ -26,6 +26,7 @@ pub struct SelectStatement {
     pub projection: Vec<SelectItem>,
     pub where_clause: Option<Expression>,
     pub order_by: Vec<OrderByItem>,
+    pub limit: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
