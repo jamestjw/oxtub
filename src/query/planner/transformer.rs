@@ -2,7 +2,7 @@ use crate::{
     catalog::{column::Column, manager::Catalog, schema::Schema, types::SqlType},
     query::{
         binder::{
-            expression::{BoundExpression, ColumnRef},
+            expression::{AggregationType, BoundExpression, ColumnRef},
             statement::{
                 BoundDelete, BoundInsert, BoundInsertSource, BoundOrderBy, BoundSelect,
                 BoundStatement, BoundUpdate,
@@ -19,9 +19,9 @@ use crate::{
                 PlannedExpression, PlannedExpressionKind,
             },
             plan::{
-                DeletePlan, FilterPlan, InsertPlan, LimitPlan, NestedLoopJoinPlan, PlanNode,
-                PlanNodeKind, PlannedOrderBy, ProjectionPlan, SeqScanPlan, SortPlan, UpdatePlan,
-                ValuesPlan,
+                AggregatePlan, AggregateSpec, DeletePlan, FilterPlan, InsertPlan, LimitPlan,
+                NestedLoopJoinPlan, PlanNode, PlanNodeKind, PlannedOrderBy, ProjectionPlan,
+                SeqScanPlan, SortPlan, UpdatePlan, ValuesPlan,
             },
         },
     },
@@ -29,6 +29,16 @@ use crate::{
 
 pub struct Planner<'catalog, 'bpm> {
     catalog: &'catalog Catalog<'bpm>,
+}
+
+#[derive(Clone, Copy)]
+struct AggregationContext {
+    group_by_count: usize,
+}
+
+struct ExpressionContext<'plan> {
+    children: &'plan [&'plan PlanNode],
+    aggregation: Option<AggregationContext>,
 }
 
 impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
@@ -58,7 +68,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         let planned_table = self.plan_table_ref(BoundTableRef::BaseTable(bound_update.table))?;
         let condition = match bound_update.filter_expr {
             Some(expr) => {
-                let (_, expr) = self.plan_expression(expr, &[&planned_table])?;
+                let (_, expr) = self.plan_expression_with_children(expr, &[&planned_table])?;
                 Some(expr)
             }
             None => None,
@@ -93,7 +103,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
 
         let scope = &[&filtered_node];
         for (col, expr) in bound_update.target_exprs {
-            let (_, target_expr) = self.plan_expression(expr, scope)?;
+            let (_, target_expr) = self.plan_expression_with_children(expr, scope)?;
             let (_, col_expr, expr_type) = self.plan_column_ref(col, scope)?;
 
             // TODO: we don't need pure equality, we could always save an INTEGER into
@@ -130,7 +140,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         let planned_table = self.plan_table_ref(BoundTableRef::BaseTable(bound_delete.table))?;
         let condition = match bound_delete.filter_expr {
             Some(expr) => {
-                let (_, expr) = self.plan_expression(expr, &[&planned_table])?;
+                let (_, expr) = self.plan_expression_with_children(expr, &[&planned_table])?;
                 Some(expr)
             }
             None => None,
@@ -233,7 +243,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             .map(|row| {
                 row.into_iter()
                     .map(|expr| {
-                        let (_, expr) = self.plan_expression(expr, &[])?;
+                        let (_, expr) = self.plan_expression_with_children(expr, &[])?;
                         Ok(expr)
                     })
                     .collect::<Result<Vec<_>, PlannerError>>()
@@ -258,14 +268,22 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
     }
 
     fn plan_select(&self, stmt: BoundSelect) -> Result<PlanNode, PlannerError> {
-        let plan = self.plan_table_ref(stmt.table)?;
+        let BoundSelect {
+            table,
+            projection,
+            where_,
+            order_by,
+            limit,
+            group_by,
+        } = stmt;
+        let plan = self.plan_table_ref(table)?;
 
         // Handle where statement (if any)
-        let plan = match stmt.where_ {
+        let plan = match where_ {
             None => plan,
             Some(where_expr) => {
                 let schema = plan.output_schema().clone();
-                let (_, expr) = self.plan_expression(where_expr, &[&plan])?;
+                let (_, expr) = self.plan_expression_with_children(where_expr, &[&plan])?;
 
                 PlanNode {
                     output_schema: schema,
@@ -277,12 +295,18 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             }
         };
 
+        let has_aggregation = !group_by.is_empty() || projection.iter().any(Self::has_aggregation);
+        let (plan, projection, aggregation_context) = if has_aggregation {
+            self.plan_aggregation(plan, group_by, projection)?
+        } else {
+            (plan, projection, None)
+        };
+
         // Handle ORDER BY before projection so sorting can reference non-projected columns.
-        let plan = if stmt.order_by.is_empty() {
+        let plan = if order_by.is_empty() {
             plan
         } else {
-            let order_bys = stmt
-                .order_by
+            let order_bys = order_by
                 .into_iter()
                 .map(
                     |BoundOrderBy {
@@ -291,7 +315,15 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                          null_type,
                      }| {
                         Ok(PlannedOrderBy {
-                            expression: (self.plan_expression(expression, &[&plan])?).1,
+                            expression: self
+                                .plan_expression(
+                                    expression,
+                                    &ExpressionContext {
+                                        children: &[&plan],
+                                        aggregation: aggregation_context,
+                                    },
+                                )?
+                                .1,
                             order_by_type,
                             null_type,
                         })
@@ -309,11 +341,17 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
 
         // Handle projections
         let plan = {
-            let mut exprs = Vec::with_capacity(stmt.projection.len());
-            let mut names = Vec::with_capacity(stmt.projection.len());
+            let mut exprs = Vec::with_capacity(projection.len());
+            let mut names = Vec::with_capacity(projection.len());
 
-            for (idx, expr) in stmt.projection.into_iter().enumerate() {
-                let (name, expr) = self.plan_expression(expr, &[&plan])?;
+            for (idx, expr) in projection.into_iter().enumerate() {
+                let (name, expr) = self.plan_expression(
+                    expr,
+                    &ExpressionContext {
+                        children: &[&plan],
+                        aggregation: aggregation_context,
+                    },
+                )?;
                 let name = name.unwrap_or_else(|| format!("__unnamed#{idx}"));
 
                 exprs.push(expr);
@@ -332,9 +370,9 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             }
         };
 
-        let plan = match stmt.limit {
+        let plan = match limit {
             Some(limit) => {
-                let (_, limit) = self.plan_expression(limit, &[&plan])?;
+                let (_, limit) = self.plan_expression_with_children(limit, &[&plan])?;
                 PlanNode {
                     output_schema: plan.output_schema().clone(),
                     kind: PlanNodeKind::Limit(LimitPlan {
@@ -347,6 +385,104 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         };
 
         Ok(plan)
+    }
+
+    fn plan_aggregation(
+        &self,
+        child: PlanNode,
+        group_by: Vec<BoundExpression>,
+        projection: Vec<BoundExpression>,
+    ) -> Result<(PlanNode, Vec<BoundExpression>, Option<AggregationContext>), PlannerError> {
+        let (group_by_names, group_by) = group_by
+            .into_iter()
+            .map(|expr| self.plan_expression_with_children(expr, &[&child]))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(name, expr)| (name.unwrap_or_else(|| "<unnamed>".into()), expr))
+            .unzip();
+
+        let mut aggregates = Vec::new();
+        let projection = projection
+            .into_iter()
+            .map(|expr| self.extract_aggregates(expr, &child, &mut aggregates))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let aggregate_plan = AggregatePlan {
+            child: Box::new(child),
+            group_by,
+            group_by_names,
+            aggregates,
+        };
+        let output_schema = aggregate_plan.infer_schema();
+        let group_count = aggregate_plan.group_by.len();
+
+        Ok((
+            PlanNode {
+                output_schema,
+                kind: PlanNodeKind::Aggregate(aggregate_plan),
+            },
+            projection,
+            Some(AggregationContext {
+                group_by_count: group_count,
+            }),
+        ))
+    }
+
+    fn has_aggregation(expr: &BoundExpression) -> bool {
+        match expr {
+            BoundExpression::Aggregation { .. } => true,
+            BoundExpression::BinaryOp { left, right, .. } => {
+                Self::has_aggregation(left) || Self::has_aggregation(right)
+            }
+            BoundExpression::UnaryOp { expr, .. } => Self::has_aggregation(expr),
+            BoundExpression::Literal(_)
+            | BoundExpression::Column(_)
+            | BoundExpression::AggregateReference(_) => false,
+        }
+    }
+
+    fn extract_aggregates(
+        &self,
+        expr: BoundExpression,
+        child: &PlanNode,
+        aggregates: &mut Vec<AggregateSpec>,
+    ) -> Result<BoundExpression, PlannerError> {
+        match expr {
+            BoundExpression::Aggregation { aggr_type, expr } => {
+                if Self::has_aggregation(&expr) {
+                    return Err(PlannerError::NestedAggregate);
+                }
+
+                let input = match aggr_type {
+                    AggregationType::CountStar => {
+                        BoundExpression::Literal(crate::types::value::Value::Integer(1))
+                    }
+                    AggregationType::Count
+                    | AggregationType::Sum
+                    | AggregationType::Min
+                    | AggregationType::Max => *expr,
+                };
+                let input = self.plan_expression_with_children(input, &[child])?.1;
+                let index = aggregates.len();
+                aggregates.push(AggregateSpec {
+                    aggregate_type: aggr_type,
+                    input,
+                });
+                Ok(BoundExpression::AggregateReference(index))
+            }
+            BoundExpression::BinaryOp { left, op, right } => Ok(BoundExpression::BinaryOp {
+                left: Box::new(self.extract_aggregates(*left, child, aggregates)?),
+                op,
+                right: Box::new(self.extract_aggregates(*right, child, aggregates)?),
+            }),
+            BoundExpression::UnaryOp { expr, op } => Ok(BoundExpression::UnaryOp {
+                expr: Box::new(self.extract_aggregates(*expr, child, aggregates)?),
+                op,
+            }),
+            expr @ (BoundExpression::Literal(_)
+            | BoundExpression::Column(_)
+            | BoundExpression::AggregateReference(_)) => Ok(expr),
+        }
     }
 
     fn plan_table_ref(&self, tbl_ref: BoundTableRef) -> Result<PlanNode, PlannerError> {
@@ -375,7 +511,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                 let predicate = match bound_join.condition().as_ref() {
                     Some(expr) => {
                         let scope = &[&left, &right];
-                        let (_, expr) = self.plan_expression(expr.clone(), scope)?;
+                        let (_, expr) = self.plan_expression_with_children(expr.clone(), scope)?;
                         Some(expr)
                     }
                     None => None,
@@ -394,10 +530,24 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
         }
     }
 
-    fn plan_expression(
+    fn plan_expression_with_children(
         &self,
         expr: BoundExpression,
         children: &[&PlanNode],
+    ) -> Result<(Option<String>, PlannedExpression), PlannerError> {
+        self.plan_expression(
+            expr,
+            &ExpressionContext {
+                children,
+                aggregation: None,
+            },
+        )
+    }
+
+    fn plan_expression(
+        &self,
+        expr: BoundExpression,
+        context: &ExpressionContext<'_>,
     ) -> Result<(Option<String>, PlannedExpression), PlannerError> {
         match expr {
             BoundExpression::Literal(value) => Ok((
@@ -409,7 +559,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
             )),
             BoundExpression::Column(column_ref) => {
                 let (name, column_value_expr, expr_type) =
-                    self.plan_column_ref(column_ref, children)?;
+                    self.plan_column_ref(column_ref, context.children)?;
                 Ok((
                     name,
                     PlannedExpression {
@@ -418,9 +568,30 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                     },
                 ))
             }
+            BoundExpression::AggregateReference(index) => {
+                let aggregation = context
+                    .aggregation
+                    .ok_or(PlannerError::UnexpectedAggregateReference)?;
+                let [child] = context.children else {
+                    panic!("aggregate references require one child");
+                };
+                let group_count = aggregation.group_by_count;
+                let column = &child.output_schema().columns()[group_count + index];
+                Ok((
+                    Some(column.name().to_string()),
+                    PlannedExpression {
+                        return_type: ExpressionType::from_column(column),
+                        kind: PlannedExpressionKind::ColumnValue(ColumnValueExpression {
+                            tuple_idx: 0,
+                            col_idx: group_count + index,
+                        }),
+                    },
+                ))
+            }
+            BoundExpression::Aggregation { .. } => todo!(),
             BoundExpression::BinaryOp { left, op, right } => {
-                let (_, left) = self.plan_expression(*left, children)?;
-                let (_, right) = self.plan_expression(*right, children)?;
+                let (_, left) = self.plan_expression(*left, context)?;
+                let (_, right) = self.plan_expression(*right, context)?;
                 let expr = match op {
                     BinaryOperator::Plus => {
                         Self::make_arithmetic_expr(left, right, ArithmeticType::Plus)
@@ -453,7 +624,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                 Ok((None, expr))
             }
             BoundExpression::UnaryOp { expr, op } => {
-                let (_, expr) = self.plan_expression(*expr, children)?;
+                let (_, expr) = self.plan_expression(*expr, context)?;
                 let expr = match op {
                     UnaryOperator::Not => Self::make_not_expr(expr),
                     UnaryOperator::Neg => Self::make_negate_expr(expr),

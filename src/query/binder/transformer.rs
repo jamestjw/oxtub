@@ -5,7 +5,7 @@ use crate::{
     query::{
         binder::{
             error::BinderError,
-            expression::{BoundExpression, ColumnRef, are_column_refs_unique},
+            expression::{AggregationType, BoundExpression, ColumnRef, are_column_refs_unique},
             statement::{
                 BoundCreateIndex, BoundCreateTable, BoundDelete, BoundExplain, BoundInsert,
                 BoundInsertSource, BoundOrderBy, BoundSelect, BoundStatement, BoundUpdate,
@@ -20,6 +20,7 @@ use crate::{
         },
         table_ref::TableRef as ParsedTableRef,
     },
+    types::value::Value,
 };
 
 pub struct Binder<'catalog, 'bpm> {
@@ -170,6 +171,8 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
             .where_clause
             .map(|expr| self.bind_expression(expr, &context))
             .transpose()?;
+        let group_by = self.bind_group_by_expressions(&context, stmt.group_by)?;
+        self.validate_grouped_projection(&projection, &group_by)?;
         let order_by = self.bind_order_by_list(stmt.order_by, &context)?;
         let limit = stmt
             .limit
@@ -182,6 +185,7 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
             where_,
             order_by,
             limit,
+            group_by,
         })
     }
 
@@ -389,6 +393,76 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
         Ok(BoundExpressionListRef::new(String::from("<unnamed>"), res))
     }
 
+    fn bind_group_by_expressions(
+        &self,
+        tbl_context: &BindContext,
+        exprs: Vec<Expression>,
+    ) -> Result<Vec<BoundExpression>, BinderError> {
+        self.bind_expr_list(exprs, tbl_context)
+    }
+
+    fn validate_grouped_projection(
+        &self,
+        projection: &[BoundExpression],
+        group_by: &[BoundExpression],
+    ) -> Result<(), BinderError> {
+        let has_aggregation = projection.iter().any(Self::contains_aggregation);
+        if group_by.is_empty() && !has_aggregation {
+            return Ok(());
+        }
+
+        if group_by.iter().any(Self::contains_aggregation) {
+            return Err(BinderError::AggregateInGroupBy);
+        }
+
+        for expression in projection {
+            Self::validate_grouped_expression(expression, group_by)?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_grouped_expression(
+        expression: &BoundExpression,
+        group_by: &[BoundExpression],
+    ) -> Result<(), BinderError> {
+        if group_by.iter().any(|group_expr| group_expr == expression) {
+            return Ok(());
+        }
+
+        match expression {
+            BoundExpression::Literal(_) => Ok(()),
+            BoundExpression::Column(column) => Err(BinderError::UngroupedColumn(column.to_str())),
+            BoundExpression::Aggregation { expr, .. } => {
+                if Self::contains_aggregation(expr) {
+                    return Err(BinderError::NestedAggregate);
+                }
+                Ok(())
+            }
+            BoundExpression::BinaryOp { left, right, .. } => {
+                Self::validate_grouped_expression(left, group_by)?;
+                Self::validate_grouped_expression(right, group_by)
+            }
+            BoundExpression::UnaryOp { expr, .. } => {
+                Self::validate_grouped_expression(expr, group_by)
+            }
+            BoundExpression::AggregateReference(_) => Ok(()),
+        }
+    }
+
+    fn contains_aggregation(expression: &BoundExpression) -> bool {
+        match expression {
+            BoundExpression::Aggregation { .. } => true,
+            BoundExpression::BinaryOp { left, right, .. } => {
+                Self::contains_aggregation(left) || Self::contains_aggregation(right)
+            }
+            BoundExpression::UnaryOp { expr, .. } => Self::contains_aggregation(expr),
+            BoundExpression::Literal(_)
+            | BoundExpression::Column(_)
+            | BoundExpression::AggregateReference(_) => false,
+        }
+    }
+
     fn bind_expr_list(
         &self,
         exprs: Vec<Expression>,
@@ -422,14 +496,35 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
                 op,
                 right: Box::new(self.bind_expression(*right, context)?),
             }),
-            Expression::CountStarAggregate
-            | Expression::CountAggregate(_)
-            | Expression::SumAggregate(_)
-            | Expression::MinAggregate(_)
-            | Expression::MaxAggregate(_) => Err(BinderError::UnsupportedExpression(
-                "aggregate expressions are not supported yet".into(),
-            )),
+            Expression::CountStarAggregate => Ok(BoundExpression::Aggregation {
+                aggr_type: AggregationType::CountStar,
+                expr: Box::new(BoundExpression::Literal(Value::Integer(1))),
+            }),
+            Expression::CountAggregate(expr) => {
+                self.bind_aggregate(AggregationType::Count, *expr, context)
+            }
+            Expression::SumAggregate(expr) => {
+                self.bind_aggregate(AggregationType::Sum, *expr, context)
+            }
+            Expression::MinAggregate(expr) => {
+                self.bind_aggregate(AggregationType::Min, *expr, context)
+            }
+            Expression::MaxAggregate(expr) => {
+                self.bind_aggregate(AggregationType::Max, *expr, context)
+            }
         }
+    }
+
+    fn bind_aggregate(
+        &self,
+        aggr_type: AggregationType,
+        expr: Expression,
+        context: &BindContext<'_>,
+    ) -> Result<BoundExpression, BinderError> {
+        Ok(BoundExpression::Aggregation {
+            aggr_type,
+            expr: Box::new(self.bind_expression(expr, context)?),
+        })
     }
 
     // todo: handle column refs that are qualified
@@ -940,6 +1035,89 @@ mod tests {
             ]
         );
         assert_eq!(select.where_, None);
+    }
+
+    #[test]
+    fn binds_grouped_and_aggregate_select_expressions() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let statement = parse_sql("select id, count(*), sum(id) from users group by id").unwrap();
+
+        let bound = binder.bind_statement(statement).unwrap();
+        let BoundStatement::Select(select) = bound else {
+            panic!("expected select statement");
+        };
+
+        assert_eq!(select.group_by.len(), 1);
+        assert!(matches!(
+            &select.projection[1],
+            BoundExpression::Aggregation {
+                aggr_type: AggregationType::CountStar,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &select.projection[2],
+            BoundExpression::Aggregation {
+                aggr_type: AggregationType::Sum,
+                expr,
+            } if matches!(expr.as_ref(), BoundExpression::Column(_))
+        ));
+    }
+
+    #[test]
+    fn allows_omitted_grouped_columns_and_grouped_scalar_expressions() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+
+        for sql in [
+            "select count(*) from users group by id",
+            "select id + 1 from users group by id",
+        ] {
+            binder
+                .bind_statement(parse_sql(sql).unwrap())
+                .unwrap_or_else(|_| panic!("expected valid grouped query: {sql}"));
+        }
+    }
+
+    #[test]
+    fn rejects_ungrouped_projected_columns() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+        let err = unwrap_binder_err(
+            binder
+                .bind_statement(parse_sql("select name, count(*) from users group by id").unwrap()),
+        );
+
+        assert!(matches!(
+            err,
+            BinderError::UngroupedColumn(column) if column == "users.name"
+        ));
+    }
+
+    #[test]
+    fn rejects_aggregates_in_group_by_and_nested_aggregates() {
+        let bpm = setup_bpm(3);
+        let mut catalog = Catalog::new(&bpm);
+        create_users_table(&mut catalog);
+        let binder = Binder::new(&catalog);
+
+        let err =
+            unwrap_binder_err(binder.bind_statement(
+                parse_sql("select count(*) from users group by count(id)").unwrap(),
+            ));
+        assert!(matches!(err, BinderError::AggregateInGroupBy));
+
+        let err = unwrap_binder_err(
+            binder.bind_statement(parse_sql("select sum(count(id)) from users").unwrap()),
+        );
+        assert!(matches!(err, BinderError::NestedAggregate));
     }
 
     #[test]

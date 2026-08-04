@@ -162,6 +162,7 @@ impl<'catalog, 'bpm> ExecutionEngine<'catalog, 'bpm> {
                     child,
                 )))
             }
+            PlanNodeKind::Aggregate(_) => todo!(),
         }
     }
 }

@@ -18,4 +18,10 @@ pub enum PlannerError {
 
     #[error("update schema mismatch")]
     UpdateSchemaMismatch,
+
+    #[error("nested aggregate expressions are not supported")]
+    NestedAggregate,
+
+    #[error("aggregate reference is not valid in this expression scope")]
+    UnexpectedAggregateReference,
 }

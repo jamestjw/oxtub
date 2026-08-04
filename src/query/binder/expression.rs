@@ -35,10 +35,24 @@ impl ColumnRef {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregationType {
+    CountStar,
+    Count,
+    Sum,
+    Min,
+    Max,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoundExpression {
     Literal(Value),
     Column(ColumnRef),
+    Aggregation {
+        aggr_type: AggregationType,
+        expr: Box<BoundExpression>,
+    },
+    AggregateReference(usize),
     BinaryOp {
         left: Box<BoundExpression>,
         op: BinaryOperator,

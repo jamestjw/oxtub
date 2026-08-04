@@ -1,0 +1,36 @@
+# GROUP BY and aggregate planning coverage.
+
+statement ok
+create table sales(region varchar(16), category varchar(16), amount int, ignored int);
+
+query
+insert into sales values
+    ('east', 'book', 10, 100),
+    ('east', 'pen', 20, 200),
+    ('west', 'book', 30, 300),
+    ('west', 'pen', 40, 400),
+    ('west', 'pen', 50, 500);
+----
+5
+
+# Aggregate only selected columns; ignored is not projected or aggregated.
+query
+explain select region, count(*), sum(amount) from sales group by region;
+----
+Aggregate group_by=[#0.0] aggregates=[count_star(1), sum(#0.2)]
+  SeqScan table=sales
+
+# Aggregate expressions can be composed in the final projection.
+query
+explain select category, max(amount) - min(amount), count(region) from sales group by category;
+----
+Projection exprs=[#0.0, (#0.1 - #0.2), #0.3]
+  Aggregate group_by=[#0.1] aggregates=[max(#0.2), min(#0.2), count(#0.0)]
+    SeqScan table=sales
+
+# Identical aggregate calls remain separate projection slots.
+query
+explain select category, sum(amount), sum(amount) from sales group by category;
+----
+Aggregate group_by=[#0.1] aggregates=[sum(#0.2), sum(#0.2)]
+  SeqScan table=sales

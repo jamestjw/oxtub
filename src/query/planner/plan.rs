@@ -1,7 +1,8 @@
 use crate::{
     catalog::{column::Column, index::IndexId, schema::Schema, table::TableId},
     query::{
-        binder::table_ref::BoundBaseTableRef,
+        binder::{expression::AggregationType, table_ref::BoundBaseTableRef},
+        planner::expression::ExpressionType,
         planner::expression::PlannedExpression,
         statement::{OrderByNullType, OrderByType},
         table_ref::JoinType,
@@ -46,6 +47,14 @@ impl PlanNode {
                 PlanNodeKind::Limit(LimitPlan {
                     child: Box::new(children.pop().unwrap()),
                     limit: limit_plan.limit.clone(),
+                })
+            }
+            PlanNodeKind::Aggregate(aggregate_plan) if children.len() == 1 => {
+                PlanNodeKind::Aggregate(AggregatePlan {
+                    child: Box::new(children.pop().unwrap()),
+                    group_by: aggregate_plan.group_by.clone(),
+                    group_by_names: aggregate_plan.group_by_names.clone(),
+                    aggregates: aggregate_plan.aggregates.clone(),
                 })
             }
             PlanNodeKind::Values(values_plan) if children.is_empty() => {
@@ -129,6 +138,7 @@ impl PlanNode {
             }
             PlanNodeKind::Sort(sort_plan) => vec![sort_plan.child.as_ref()],
             PlanNodeKind::Limit(limit_plan) => vec![limit_plan.child.as_ref()],
+            PlanNodeKind::Aggregate(aggregate_plan) => vec![aggregate_plan.child.as_ref()],
         }
     }
 }
@@ -140,6 +150,7 @@ pub enum PlanNodeKind {
     Projection(ProjectionPlan),
     Sort(SortPlan),
     Limit(LimitPlan),
+    Aggregate(AggregatePlan),
     Values(ValuesPlan),
     Insert(InsertPlan),
     CreateTable(CreateTablePlan),
@@ -289,6 +300,45 @@ pub struct SortPlan {
 pub struct LimitPlan {
     pub child: Box<PlanNode>,
     pub limit: PlannedExpression,
+}
+
+#[derive(Debug, Clone)]
+pub struct AggregatePlan {
+    pub child: Box<PlanNode>,
+    pub group_by: Vec<PlannedExpression>,
+    pub group_by_names: Vec<String>,
+    pub aggregates: Vec<AggregateSpec>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AggregateSpec {
+    pub aggregate_type: AggregationType,
+    pub input: PlannedExpression,
+}
+
+impl AggregatePlan {
+    pub fn infer_schema(&self) -> Schema {
+        let mut columns = self
+            .group_by
+            .iter()
+            .zip(&self.group_by_names)
+            .map(|(expr, name)| expr.return_type.to_column(name.clone()))
+            .collect::<Vec<_>>();
+
+        columns.extend(self.aggregates.iter().enumerate().map(|(idx, aggregate)| {
+            let return_type = match aggregate.aggregate_type {
+                AggregationType::CountStar | AggregationType::Count => {
+                    ExpressionType::new_integer()
+                }
+                AggregationType::Sum | AggregationType::Min | AggregationType::Max => {
+                    aggregate.input.return_type
+                }
+            };
+            return_type.to_column(format!("__agg#{idx}"))
+        }));
+
+        Schema::new(&columns)
+    }
 }
 
 #[derive(Debug, Clone)]

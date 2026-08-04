@@ -51,4 +51,13 @@ pub enum BinderError {
 
     #[error("must select something")]
     EmptySelectProjection,
+
+    #[error("column is not grouped: {0}")]
+    UngroupedColumn(String),
+
+    #[error("aggregate expressions are not allowed in GROUP BY")]
+    AggregateInGroupBy,
+
+    #[error("nested aggregate expressions are not supported")]
+    NestedAggregate,
 }

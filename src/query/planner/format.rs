@@ -2,6 +2,7 @@ use std::fmt::Write;
 
 use crate::{
     query::{
+        binder::expression::AggregationType,
         planner::{
             expression::{
                 ArithmeticType, ComparisonType, LogicType, NullCheckType, PlannedExpression,
@@ -111,6 +112,31 @@ fn format_plan_node(plan: &PlanNode, indent: usize, out: &mut String) {
             let _ = writeln!(out, "Limit count={}", format_expr(&limit_plan.limit));
             format_plan_node(&limit_plan.child, indent + 1, out);
         }
+        PlanNodeKind::Aggregate(aggregate) => {
+            let group_by = aggregate
+                .group_by
+                .iter()
+                .map(format_expr)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let aggregates = aggregate
+                .aggregates
+                .iter()
+                .map(|aggregate| {
+                    format!(
+                        "{}({})",
+                        format_aggregate_type(&aggregate.aggregate_type),
+                        format_expr(&aggregate.input)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                out,
+                "Aggregate group_by=[{group_by}] aggregates=[{aggregates}]"
+            );
+            format_plan_node(&aggregate.child, indent + 1, out);
+        }
     }
 }
 
@@ -201,6 +227,16 @@ fn format_null_check_type(null_check_type: &NullCheckType) -> &'static str {
     match null_check_type {
         NullCheckType::IsNull => "IS NULL",
         NullCheckType::IsNotNull => "IS NOT NULL",
+    }
+}
+
+fn format_aggregate_type(aggregate_type: &AggregationType) -> &'static str {
+    match aggregate_type {
+        AggregationType::CountStar => "count_star",
+        AggregationType::Count => "count",
+        AggregationType::Sum => "sum",
+        AggregationType::Min => "min",
+        AggregationType::Max => "max",
     }
 }
 

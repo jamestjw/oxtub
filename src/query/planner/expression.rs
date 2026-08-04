@@ -17,6 +17,13 @@ impl ExpressionType {
         }
     }
 
+    pub fn new_integer() -> Self {
+        Self {
+            sql_type: SqlType::Integer,
+            varchar_size: None,
+        }
+    }
+
     pub fn from_column(column: &Column) -> Self {
         Self {
             sql_type: column.sql_type(),

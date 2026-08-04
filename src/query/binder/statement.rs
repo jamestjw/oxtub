@@ -27,6 +27,7 @@ pub struct BoundSelect {
     pub where_: Option<BoundExpression>,
     pub order_by: Vec<BoundOrderBy>,
     pub limit: Option<BoundExpression>,
+    pub group_by: Vec<BoundExpression>,
 }
 
 #[derive(Debug)]
