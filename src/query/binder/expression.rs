@@ -37,7 +37,6 @@ impl ColumnRef {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregationType {
-    CountStar,
     Count,
     Sum,
     Min,

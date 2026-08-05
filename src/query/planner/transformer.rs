@@ -453,15 +453,7 @@ impl<'catalog, 'bpm> Planner<'catalog, 'bpm> {
                     return Err(PlannerError::NestedAggregate);
                 }
 
-                let input = match aggr_type {
-                    AggregationType::CountStar => {
-                        BoundExpression::Literal(crate::types::value::Value::Integer(1))
-                    }
-                    AggregationType::Count
-                    | AggregationType::Sum
-                    | AggregationType::Min
-                    | AggregationType::Max => *expr,
-                };
+                let input = *expr;
                 let input = self.plan_expression_with_children(input, &[child])?.1;
                 let index = aggregates.len();
                 aggregates.push(AggregateSpec {

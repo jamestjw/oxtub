@@ -497,7 +497,7 @@ impl<'catalog, 'bpm> Binder<'catalog, 'bpm> {
                 right: Box::new(self.bind_expression(*right, context)?),
             }),
             Expression::CountStarAggregate => Ok(BoundExpression::Aggregation {
-                aggr_type: AggregationType::CountStar,
+                aggr_type: AggregationType::Count,
                 expr: Box::new(BoundExpression::Literal(Value::Integer(1))),
             }),
             Expression::CountAggregate(expr) => {
@@ -1054,9 +1054,9 @@ mod tests {
         assert!(matches!(
             &select.projection[1],
             BoundExpression::Aggregation {
-                aggr_type: AggregationType::CountStar,
-                ..
-            }
+                aggr_type: AggregationType::Count,
+                expr,
+            } if matches!(expr.as_ref(), BoundExpression::Literal(Value::Integer(1)))
         ));
         assert!(matches!(
             &select.projection[2],

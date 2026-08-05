@@ -17,7 +17,7 @@ insert into sales values
 query
 explain select region, count(*), sum(amount) from sales group by region;
 ----
-Aggregate group_by=[#0.0] aggregates=[count_star(1), sum(#0.2)]
+Aggregate group_by=[#0.0] aggregates=[count(1), sum(#0.2)]
   SeqScan table=sales
 
 # Aggregate expressions can be composed in the final projection.

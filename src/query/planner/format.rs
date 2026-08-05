@@ -232,7 +232,6 @@ fn format_null_check_type(null_check_type: &NullCheckType) -> &'static str {
 
 fn format_aggregate_type(aggregate_type: &AggregationType) -> &'static str {
     match aggregate_type {
-        AggregationType::CountStar => "count_star",
         AggregationType::Count => "count",
         AggregationType::Sum => "sum",
         AggregationType::Min => "min",

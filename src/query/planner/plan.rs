@@ -327,9 +327,7 @@ impl AggregatePlan {
 
         columns.extend(self.aggregates.iter().enumerate().map(|(idx, aggregate)| {
             let return_type = match aggregate.aggregate_type {
-                AggregationType::CountStar | AggregationType::Count => {
-                    ExpressionType::new_integer()
-                }
+                AggregationType::Count => ExpressionType::new_integer(),
                 AggregationType::Sum | AggregationType::Min | AggregationType::Max => {
                     aggregate.input.return_type
                 }
