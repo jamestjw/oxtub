@@ -1,3 +1,4 @@
+pub mod aggregation;
 pub mod delete;
 pub mod engine;
 pub mod error;
