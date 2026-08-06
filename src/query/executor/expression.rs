@@ -311,7 +311,7 @@ fn eval_numeric_comparison(
     Ok(Value::Boolean(res))
 }
 
-fn eval_arithmetic(
+pub fn eval_arithmetic(
     arithmetic_type: &ArithmeticType,
     left_value: Value,
     right_value: Value,
@@ -351,7 +351,6 @@ fn is_numeric_type(sql_type: SqlType) -> bool {
 fn eval_numeric_arithmetic(
     left: Value,
     right: Value,
-
     op: fn(CmpNumeric, CmpNumeric) -> Result<Value, ExecutionError>,
 ) -> Result<Value, ExecutionError> {
     let result_type = numeric_result_type(&left, &right)?;
